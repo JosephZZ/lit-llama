@@ -24,7 +24,7 @@ This implementation builds on [nanoGPT](<https://github.com/karpathy/nanoGPT>).
 
 The open-source code in this repository works with the original LLaMA weights that are distributed by Meta under a [research-only license](https://github.com/facebookresearch/llama/blob/main/MODEL_CARD.md#model-details).
 
-New Apache 2.0 licensed weights are being released as part of the [Open LLaMA project](https://github.com/openlm-research/open_llama). Both the original research-only weights by Meta and the Open LLaMA weights can be [loaded in Lit-LLaMA](howto/download_weights.md).
+New Apache 2.0 licensed weights are being released as part of the [Open LLaMA project](https://github.com/openlm-research/open_llama). To use the Open LLaMA weights or other LLaMA-like checkpoints such as Vicuna, check out the [Lit-GPT repository](https://github.com/Lightning-AI/lit-gpt).
 
 ## Why?
 
@@ -132,7 +132,7 @@ We provide a simple training scripts in `finetune/lora.py` and `finetune/adapter
    ```
 
 It is expected that you have downloaded the pretrained weights as described above.
-The finetuning requires at least one GPU with ~24 GB memory (GTX 3090). Follow the instructions in the script to efficiently fit your GPU memory.
+The finetuning requires at least one GPU with ~24 GB memory (RTX 3090). Follow the instructions in the script to efficiently fit your GPU memory.
 Note: For some GPU models you might need to set `torch.backends.cuda.enable_flash_sdp(False)` (see comments at the top of the script).
 
 More details about each finetuning method and how you can apply it to your own data can be found in our technical how-to guides.
