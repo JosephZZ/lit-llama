@@ -52,7 +52,7 @@ from lit_llama.model import build_rope_cache, apply_rope, RMSNorm, MLP, KVCache,
 
 @dataclass
 class LLaMAConfig(llama.LLaMAConfig):
-    adapter_prompt_length: int = 10
+    adapter_prompt_length: int = 100
     adapter_start_layer: int = 2
 
 
@@ -60,7 +60,7 @@ class CausalSelfAttention(nn.Module):
     """A modification of `lit_llama.model.CausalSelfAttention` that adds the attention
     over the adaption prompt."""
 
-    def __init__(self, config: LLaMAConfig, block_idx: int) -> None:
+    def __init__(self, config: LLaMAConfig, block_idx: int, global_value_embedding=None) -> None:
         super().__init__()
         assert config.n_embd % config.n_head == 0
 
@@ -71,7 +71,11 @@ class CausalSelfAttention(nn.Module):
 
         if block_idx >= config.adapter_start_layer:
             # adapter embedding layer
-            self.adapter_wte = nn.Embedding(config.adapter_prompt_length, config.n_embd)
+            if global_value_embedding is not None:
+                self.adapter_wte = global_value_embedding
+                print("Using global value embedding for adapter at layer ", block_idx)
+            else:
+                self.adapter_wte = nn.Embedding(config.adapter_prompt_length, config.n_embd)
             # a learnable gating factor (to avoid potential disruption of pretrained weights) initialized with zeros (to
             # avoid noise from adaption prompts at the early training stage)
             self.gating_factor = torch.nn.Parameter(torch.zeros(1, config.n_head, 1, 1))
@@ -161,6 +165,7 @@ class CausalSelfAttention(nn.Module):
             # obtained from self-attention step. This is mathematically equivalent to concatenation of prefix and input as per paper.
             amask = torch.ones(q.shape[-2], ak.shape[-2], dtype=torch.bool, device=x.device) # (T, aT)
             # ↓ (B, nh, T, hs) @ (B, nh, aT, hs).mT --> (B, nh, T, aT) @ (B, nh, aT, hs) --> (B, nh, T, hs)
+            # TODO: add a network that adapts the k and v of value_embedding based on the input q
             ay = F.scaled_dot_product_attention(q, ak, av, attn_mask=amask, dropout_p=0.0, is_causal=False) # (B, nh, T, hs)
             y = y + self.gating_factor * ay
 
@@ -192,10 +197,10 @@ class Block(nn.Module):
     """The implementation is identical to `lit_llama.model.Block` with the exception that
     we replace the attention layer where adaption is implemented."""
 
-    def __init__(self, config: LLaMAConfig, block_idx: int) -> None:
+    def __init__(self, config: LLaMAConfig, block_idx: int, global_value_embedding=None) -> None:
         super().__init__()
         self.rms_1 = RMSNorm(config.n_embd)
-        self.attn = CausalSelfAttention(config, block_idx)
+        self.attn = CausalSelfAttention(config, block_idx, global_value_embedding)
         self.rms_2 = RMSNorm(config.n_embd)
         self.mlp = MLP(config)
 
@@ -227,15 +232,16 @@ class LLaMA(llama.LLaMA):
         assert config.block_size is not None
         self.config = config
 
+        self.global_value_embedding = nn.Embedding(config.adapter_prompt_length, config.n_embd)
+
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.transformer = nn.ModuleDict(
             dict(
                 wte=nn.Embedding(config.vocab_size, config.n_embd),
-                h=nn.ModuleList(Block(config, i) for i in range(config.n_layer)),
+                h=nn.ModuleList(Block(config, i, self.global_value_embedding) for i in range(config.n_layer)),
                 ln_f=RMSNorm(config.n_embd),
             )
         )
-
         self.rope_cache: Optional[RoPECache] = None
         self.mask_cache: Optional[torch.Tensor] = None
         self.kv_caches: List[KVCache] = []
@@ -305,7 +311,7 @@ class LLaMA(llama.LLaMA):
 def mark_only_adapter_as_trainable(model: LLaMA) -> None:
     """Sets `requires_grad=False` for all non-adapter weights."""
     for name, param in model.named_parameters():
-        param.requires_grad = "adapter_wte" in name or "gating_factor" in name
+        param.requires_grad = "adapter_wte" in name or "gating_factor" in name or "global_value_embedding" in name
 
 
 def adapter_state_from_state_dict(state_dict: dict) -> dict:

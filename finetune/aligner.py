@@ -26,7 +26,7 @@ wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
 from generate import generate
-from lit_llama.adapter import LLaMA, LLaMAConfig, mark_only_adapter_as_trainable, adapter_state_from_state_dict
+from lit_llama.aligner import LLaMA, LLaMAConfig, mark_only_adapter_as_trainable, adapter_state_from_state_dict
 from lit_llama.tokenizer import Tokenizer
 from scripts.prepare_alpaca import generate_prompt
 from lightning.fabric.strategies import DeepSpeedStrategy
@@ -61,8 +61,9 @@ ds_config = {
 
 def main(
     data_dir: str = "data/alpaca", 
-    pretrained_path: str = "checkpoints/lit-llama/7B/lit-llama.pth",
-    out_dir: str = "out/adapter/alpaca",
+    pretrained_path: str = "checkpoints/lit-open-llama/7B/lit-llama.pth",
+    out_dir: str = "out/aligner/alpaca",
+    save_model_name = "lit-llama-aligner-100vectors-finetuned.pth",
 ):
 
     fabric = L.Fabric(
@@ -103,7 +104,7 @@ def main(
     train(fabric, model, optimizer, train_data, val_data, out_dir)
 
     # Save the final checkpoint at the end of training
-    save_model_checkpoint(fabric, model, os.path.join(out_dir, "lit-llama-adapter-finetuned.pth"))
+    save_model_checkpoint(fabric, model, os.path.join(out_dir, save_model_name))
 
 
 def train(
