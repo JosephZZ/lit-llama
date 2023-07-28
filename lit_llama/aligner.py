@@ -52,7 +52,7 @@ from lit_llama.model import build_rope_cache, apply_rope, RMSNorm, MLP, KVCache,
 
 @dataclass
 class LLaMAConfig(llama.LLaMAConfig):
-    adapter_prompt_length: int = 100
+    adapter_prompt_length: int = 10
     adapter_start_layer: int = 2
 
 
@@ -248,8 +248,10 @@ class LLaMA(llama.LLaMA):
         self.adapter_kv_caches: List[KVCache] = []
 
     @classmethod
-    def from_name(cls, name: str):
-        return cls(LLaMAConfig.from_name(name))
+    def from_name(cls, name: str, aligner_length: int, aligner_start_layer: int = 2) -> "LLaMA":
+        config = LLaMAConfig.from_name(name)
+        config.adapter_prompt_length = aligner_length
+        return cls(config)
 
     def reset_cache(self) -> None:
         super().reset_cache()

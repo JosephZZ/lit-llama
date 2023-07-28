@@ -31,12 +31,12 @@ eval_iters = 100
 log_interval = 1
 
 # Hyperparameters
-learning_rate = 3e-4
-batch_size = 128
-micro_batch_size = 4
+learning_rate = 9e-5
+batch_size = 64
+micro_batch_size = 16
 gradient_accumulation_iters = batch_size // micro_batch_size
 assert gradient_accumulation_iters > 0
-max_iters = 50000 * 3 // micro_batch_size
+max_iters = 50000 * 10 // micro_batch_size
 weight_decay = 0.0
 max_seq_length = 256  # see scripts/prepare_alpaca.py
 lora_r = 8
@@ -47,9 +47,9 @@ warmup_iters = 100
 
 def main(
     data_dir: str = "data/alpaca", 
-    pretrained_path: str = "checkpoints/lit-llama/7B/lit-llama.pth",
-    tokenizer_path: str = "checkpoints/lit-llama/tokenizer.model",
-    out_dir: str = "out/lora/alpaca",
+    pretrained_path: str = "checkpoints/lit-llama-2/7B/lit-llama.pth",
+    tokenizer_path: str = "checkpoints/lit-llama-2/tokenizer.model",
+    out_dir: str = "out/lora/llama2-alpaca",
 ):
 
     fabric = L.Fabric(accelerator="cuda", devices=1, precision="bf16-true")

@@ -45,9 +45,9 @@ log_interval = 1
 devices = 1
 
 # Hyperparameters
-learning_rate = 9e-3
+learning_rate = 9e-5
 batch_size = 64 / devices
-micro_batch_size = 4
+micro_batch_size = 8
 gradient_accumulation_iters = batch_size // micro_batch_size
 assert gradient_accumulation_iters > 0
 epoch_size = 50000  # train dataset size
@@ -66,8 +66,8 @@ ds_config = {
 
 def main(
     data_dir: str = "data/alpaca", 
-    pretrained_path: str = "checkpoints/lit-llama/7B/lit-llama.pth",
-    out_dir: str = "out/adapter_v2/alpaca",
+    pretrained_path: str = "checkpoints/lit-llama-2/7B/lit-llama.pth",
+    out_dir: str = "out/adapter_v2/llama2-alpaca",
 ):
 
     fabric = L.Fabric(

@@ -1,7 +1,7 @@
 """Implementation derived from https://github.com/tloen/alpaca-lora"""
 import sys
 from pathlib import Path
-
+import os
 # support running without installing as a package
 wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
@@ -14,35 +14,45 @@ from lit_llama.tokenizer import Tokenizer
 from tqdm import tqdm
 
 
-DATA_FILE = "https://raw.githubusercontent.com/tloen/alpaca-lora/main/alpaca_data_cleaned_archive.json"
-DATA_FILE_NAME = "alpaca_data_cleaned_archive.json"
+import datasets
+
+DATA_FILE_NAME = "all.json"
 IGNORE_INDEX = -1
 
-
 def prepare(
-    destination_path: Path = Path("data/alpaca"), 
+    data_folder: Path = Path("data/isotonic"), 
     tokenizer_path: Path = Path("checkpoints/lit-llama/tokenizer.model"),
     test_split_size: int = 2000,
-    max_seq_length: int = 256,
+    max_seq_length: int = 1536,
     seed: int = 42,
     mask_inputs: bool = False,  # as in alpaca-lora
-    data_file_name: str = DATA_FILE_NAME
 ) -> None:
-    """Prepare the Alpaca dataset for instruction tuning.
+    """Prepare the Dolly dataset for instruction tuning.
     
     The output is a training and validation dataset saved as `train.pt` and `val.pt`,
     which stores the preprocessed and tokenized prompts and labels.
     """
-    
-    destination_path.mkdir(parents=True, exist_ok=True)
-    file_path = destination_path / data_file_name
-    download(file_path)
+    # destination_path.mkdir(parents=True, exist_ok=True)
+    file_path = data_folder / DATA_FILE_NAME
 
-    # TODO: If we don't have the Meta weights, where do we get the tokenizer from?
+    if not os.path.exists(data_folder / DATA_FILE_NAME):
+        ds = datasets.load_dataset("Isotonic/open-instruct-v1_deduped")
+        ds = datasets.concatenate_datasets([ds["train"], ds["test"]])
+        ds.to_json(data_folder / DATA_FILE_NAME)
+
+
+    # # TODO: If we don't have the Meta weights, where do we get the tokenizer from?
     tokenizer = Tokenizer(tokenizer_path)
-    
+
     with open(file_path, "r") as file:
-        data = json.load(file)
+        data = file.readlines()
+        data = [json.loads(line) for line in data]
+        # data = json.load(file)
+
+    for item in data:
+        item.pop("text")
+
+
 
     # Partition the dataset into train and test
     train_split_size = len(data) - test_split_size
@@ -65,12 +75,12 @@ def prepare(
     torch.save(test_set, file_path.parent / "test.pt")
 
 
-def download(file_path: Path):
-    """Downloads the raw json data file and saves it in the given destination."""
-    if file_path.exists():
-        return
-    with open(file_path, "w") as f:
-        f.write(requests.get(DATA_FILE).text)
+# def download(file_path: Path):
+#     """Downloads the raw json data file and saves it in the given destination."""
+#     if file_path.exists():
+#         return
+#     with open(file_path, "w") as f:
+#         f.write(requests.get(DATA_FILE).text)
 
 
 def prepare_sample(example: dict, tokenizer: Tokenizer, max_length: int, mask_inputs: bool = True):
@@ -83,10 +93,9 @@ def prepare_sample(example: dict, tokenizer: Tokenizer, max_length: int, mask_in
     - output: The response string
 
     This function processes this data to produce a prompt text and a label for
-    supervised training. The input text is formed as a single message including all
-    the instruction, the input (optional) and the response.
-    The label/target is the same message but can optionally have the instruction + input text
-    masked out (mask_inputs=True).
+    supervised training. The prompt text is formed as a single message including both
+    the instruction and the input. The label/target is the same message but with the
+    response attached.
 
     Finally, both the prompt and the label get tokenized. If desired, all tokens
     in the label that correspond to the original input prompt get masked out (default).
@@ -114,53 +123,16 @@ def generate_prompt(example):
 
     if example["input"]:
         return (
-            "Below is an instruction that describes a task, paired with an input that provides further context. "
+            f"Below is an instruction that describes a task, paired with an input that provides further context. "
             "Write a response that appropriately completes the request.\n\n"
             f"### Instruction:\n{example['instruction']}\n\n### Input:\n{example['input']}\n\n### Response:"
         )
     return (
-        "Below is an instruction that describes a task. "
+        f"Below is an instruction that describes a task. "
         "Write a response that appropriately completes the request.\n\n"
         f"### Instruction:\n{example['instruction']}\n\n### Response:"
     )
 
-def generate_multi_turn_prompt(example, history_examples):
-    """Generates a standardized message to prompt the model with an instruction, optional input and a
-    'response' field."""
-    if len(history_examples) == 0:
-        if example["input"]:
-            return (
-                "Below is an instruction that describes a task, paired with an input that provides further context. "
-                "Write a response that appropriately completes the request.\n\n"
-                f"### Instruction:\n{example['instruction']}\n\n### Input:\n{example['input']}\n\n### Response:"
-            )
-        return (
-            "Below is an instruction that describes a task. "
-            "Write a response that appropriately completes the request.\n\n"
-            f"### Instruction:\n{example['instruction']}\n\n### Response:"
-        )
-    else:
-        conversation_history = ""
-        for his_examp in history_examples:
-            if his_examp["input"]:
-                conversation_history += f"### Instruction: \n{his_examp['instruction']}\n### Input:\n{example['input']}\n### Response:\n{his_examp['output']}\n\n"
-            else:
-                conversation_history += f"### Instruction: \n{his_examp['instruction']}\n### Response:\n{his_examp['output']}\n"
-        if example["input"]:
-            return (
-                f"Here is a history of your previous responses: \n\n {conversation_history} \n\n\n"
-                "Below is an instruction that describes a task, paired with an input that provides further context. "
-                "Write a response that appropriately completes the request.\n\n"
-                f"### Instruction:\n{example['instruction']}\n\n### Input:\n{example['input']}\n\n### Response:"
-            )
-        else:
-            return (
-                f"Here is a history of your previous responses:  \n\n {conversation_history} \n\n\n"
-                "Below is an instruction that describes a task. "
-                "Write a response that appropriately completes the request.\n\n"
-                f"### Instruction:\n{example['instruction']}\n\n### Response:"
-            )
-        
 
 if __name__ == "__main__":
     from jsonargparse import CLI

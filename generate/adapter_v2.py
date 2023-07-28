@@ -76,25 +76,32 @@ def main(
     model = fabric.setup(model)
 
     tokenizer = Tokenizer(tokenizer_path)
-    sample = {"instruction": prompt, "input": input}
-    prompt = generate_prompt(sample)
-    encoded = tokenizer.encode(prompt, bos=True, eos=False, device=model.device)
-    prompt_length = encoded.size(0)
 
-    t0 = time.perf_counter()
-    y = generate(model, encoded, max_new_tokens, temperature=temperature, top_k=top_k, eos_id=tokenizer.eos_id)
-    t = time.perf_counter() - t0
+    prompts = prompt.split("[NewPrompt]")
+    inputs = input.split("[NewPrompt]")
+    if len(prompts) == len(inputs):
+        samples = [{"instruction": p.strip(), "input": i.strip()} for p, i in zip(prompts, inputs)]
+    else:
+        samples = [{"instruction": p.strip(), "input": ""} for p in prompts]
 
-    model.reset_cache()
-    output = tokenizer.decode(y)
-    output = output.split("### Response:")[1].strip()
-    print(output)
+    for sample in samples:
+        prompt = generate_prompt(sample)
+        encoded = tokenizer.encode(prompt, bos=True, eos=False, device=model.device)
+        prompt_length = encoded.size(0)
 
-    tokens_generated = y.size(0) - prompt_length
-    print(f"\n\nTime for inference: {t:.02f} sec total, {tokens_generated / t:.02f} tokens/sec", file=sys.stderr)
-    if fabric.device.type == "cuda":
-        print(f"Memory used: {torch.cuda.max_memory_reserved() / 1e9:.02f} GB", file=sys.stderr)
+        t0 = time.perf_counter()
+        y = generate(model, encoded, max_new_tokens, temperature=temperature, top_k=top_k, eos_id=tokenizer.eos_id)
+        t = time.perf_counter() - t0
 
+        model.reset_cache()
+        output = tokenizer.decode(y)
+        # output = output.split("### Response:")[1].strip()
+        print(output)
+
+        tokens_generated = y.size(0) - prompt_length
+        print(f"\n\nTime for inference: {t:.02f} sec total, {tokens_generated / t:.02f} tokens/sec", file=sys.stderr)
+        if fabric.device.type == "cuda":
+            print(f"Memory used: {torch.cuda.max_memory_reserved() / 1e9:.02f} GB", file=sys.stderr)
 
 if __name__ == "__main__":
     from jsonargparse import CLI

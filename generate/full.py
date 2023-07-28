@@ -20,10 +20,10 @@ from generate import generate
 def main(
     prompt: str = "Hello, my name is",
     *,
-    num_samples: int = 1,
-    max_new_tokens: int = 50,
+    num_samples: int = 3,
+    max_new_tokens: int = 100,
     top_k: int = 200,
-    temperature: float = 0.8,
+    temperature: float = 0.7,
     checkpoint_path: Optional[Path] = None,
     tokenizer_path: Path = Path("checkpoints/lit-llama/tokenizer.model"),
     model_size: str = "7B",

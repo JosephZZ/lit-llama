@@ -19,15 +19,16 @@ from scripts.prepare_alpaca import generate_prompt
 
 
 def main(
-    prompt: str = "What food do lamas eat?",
+    prompt: str = "Implement a Python function to find the longest common subsequence of two input strings using dynamic programming.",
     input: str = "",
-    aligner_path: Path = Path("/home/ziheng/sharedWithLocal/llm/lit-llama/out/aligner/alpaca/openllama-7B/10vectors/lit-openllama_alpaca-aligner-10vectors-finetuned.pth"),
-    pretrained_path: Path = Path("/home/ziheng/sharedWithLocal/llm/lit-llama/checkpoints/lit-open-llama/7B/lit-open-llama.pth"),
-    tokenizer_path: Path = Path("/home/ziheng/sharedWithLocal/llm/lit-llama/checkpoints/lit-open-llama/tokenizer.model"),
+    aligner_path: Path = Path("out/aligner/lit-open-llama-alpaca/7B/10vector-start_layer2-lr9e-05bs64/epoch-5.11992-iter-063999.pth"),
+    pretrained_path: Path = Path("checkpoints/lit-open-llama/7B/lit-open-llama.pth"),
+    tokenizer_path: Path = Path("checkpoints/lit-open-llama/tokenizer.model"),
     quantize: Optional[str] = None,
     max_new_tokens: int = 100,
     top_k: int = 200,
-    temperature: float = 0.8,
+    temperature: float = 0.7,
+    aligner_length: int = 10,
 ) -> None:
     """Generates a response based on a given instruction and an optional input.
     This script will only work with checkpoints from the instruction-tuned LLaMA-Adapter model.
@@ -61,7 +62,7 @@ def main(
         name = llama_model_lookup(pretrained_checkpoint)
 
         with fabric.init_module(empty_init=True), quantization(mode=quantize):
-            model = LLaMA.from_name(name)
+            model = LLaMA.from_name(name, aligner_length)
 
         # 1. Load the pretrained weights
         model.load_state_dict(pretrained_checkpoint, strict=False)
@@ -73,25 +74,34 @@ def main(
     model.eval()
     model = fabric.setup(model)
 
+    print ("aligner_length:", model.config.adapter_prompt_length)
+
     tokenizer = Tokenizer(tokenizer_path)
-    sample = {"instruction": prompt, "input": input}
-    prompt = generate_prompt(sample)
-    encoded = tokenizer.encode(prompt, bos=True, eos=False, device=model.device)
-    prompt_length = encoded.size(0)
+    prompts = prompt.split("[NewPrompt]")
+    inputs = input.split("[NewPrompt]")
+    if len(prompts) == len(inputs):
+        samples = [{"instruction": p.strip(), "input": i.strip()} for p, i in zip(prompts, inputs)]
+    else:
+        samples = [{"instruction": p.strip(), "input": ""} for p in prompts]
 
-    t0 = time.perf_counter()
-    y = generate(model, encoded, max_new_tokens, temperature=temperature, top_k=top_k, eos_id=tokenizer.eos_id)
-    t = time.perf_counter() - t0
+    for sample in samples:
+        prompt = generate_prompt(sample)
+        encoded = tokenizer.encode(prompt, bos=True, eos=False, device=model.device)
+        prompt_length = encoded.size(0)
 
-    model.reset_cache()
-    output = tokenizer.decode(y)
-    output = output.split("### Response:")[1].strip()
-    print(output)
+        t0 = time.perf_counter()
+        y = generate(model, encoded, max_new_tokens, temperature=temperature, top_k=top_k, eos_id=tokenizer.eos_id)
+        t = time.perf_counter() - t0
 
-    tokens_generated = y.size(0) - prompt_length
-    print(f"\n\nTime for inference: {t:.02f} sec total, {tokens_generated / t:.02f} tokens/sec", file=sys.stderr)
-    if fabric.device.type == "cuda":
-        print(f"Memory used: {torch.cuda.max_memory_reserved() / 1e9:.02f} GB", file=sys.stderr)
+        model.reset_cache()
+        output = tokenizer.decode(y)
+        # output = output.split("### Response:")[1].strip()
+        print(output)
+
+        tokens_generated = y.size(0) - prompt_length
+        print(f"\n\nTime for inference: {t:.02f} sec total, {tokens_generated / t:.02f} tokens/sec", file=sys.stderr)
+        if fabric.device.type == "cuda":
+            print(f"Memory used: {torch.cuda.max_memory_reserved() / 1e9:.02f} GB", file=sys.stderr)
 
 
 if __name__ == "__main__":
