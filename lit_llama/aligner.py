@@ -318,4 +318,4 @@ def mark_only_adapter_as_trainable(model: LLaMA) -> None:
 
 def adapter_state_from_state_dict(state_dict: dict) -> dict:
     """Returns the model state dict with only the adapter weights for saving."""
-    return {name: param for name, param in state_dict.items() if "adapter_wte" in name or "gating_factor" in name}
+    return {name: param for name, param in state_dict.items() if "adapter_wte" in name or "gating_factor" in name or "global_value_embedding" in name}

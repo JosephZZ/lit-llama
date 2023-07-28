@@ -35,7 +35,7 @@ from lightning.fabric.strategies import DeepSpeedStrategy
 instruction_tuning = True
 eval_interval = 6000
 save_interval = 1000
-eval_iters = 1000
+eval_iters = 200
 log_interval = 1
 devices = 1
 
@@ -51,7 +51,7 @@ max_iters = num_epochs * (epoch_size // micro_batch_size) // devices
 weight_decay = 0.02
 max_seq_length = 1536 #alpaca 256, dolly 1024, lima 2048, isotonic 1536 # see scripts/prepare_alpaca.py
 warmup_iters = 2 * (50000 // micro_batch_size) // devices  # 2 alpaca epochs
-start_iter = 63999
+start_iter = 0
 
 ds_config = {
     "train_micro_batch_size_per_gpu": micro_batch_size,
@@ -65,12 +65,14 @@ aligner_start_layer = 2
 data_dir = Path("data/isotonic")
 model_base = "lit-open-llama"
 pretrained_path = Path(f"checkpoints/{model_base}/{model_size}/lit-llama.pth")
-previous_aligner_path = "out/aligner/lit-open-llama-isotonic/7B/1vector-start_layer2-lr9e-05bs64/epoch-0.4571357142857143-iter-063999.pth"
+previous_aligner_path = ""#"out/aligner/lit-open-llama-isotonic/7B/1vector-start_layer2-lr9e-05bs64/epoch-0.4571357142857143-iter-063999.pth"
+previous_optimizer_path = ""
 out_dir = Path(f"out/aligner/{model_base}-{data_dir.name}/{model_size}/{aligner_length}vector-start_layer{aligner_start_layer}-lr{learning_rate}bs{int(batch_size)}/")
 save_model_name = f"{model_size}-{aligner_length}vector-start_layer{aligner_start_layer}-lr{learning_rate}bs{int(batch_size)}.pth"
 
 print(f"Training LLaMA-Aligner with base model {model_base} using {model_size} parameters on the {data_dir.name} dataset, saving to {out_dir}")
 
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 def main():
 
     fabric = L.Fabric(
@@ -103,6 +105,9 @@ def main():
         model = LLaMA(config)
         # strict=False because missing keys due to adapter weights not containted in state dict
         model.load_state_dict(checkpoint, strict=False)
+        if previous_aligner_path:
+            model.load_state_dict(torch.load(previous_aligner_path), strict=False)
+
     print("aligner length: ",model.config.adapter_prompt_length)
 
     mark_only_adapter_as_trainable(model)
@@ -111,6 +116,9 @@ def main():
     print(f"Number of trainable parameters: {num_params}")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    if previous_optimizer_path:
+        optimizer.load_state_dict(torch.load(previous_optimizer_path))
+
     model, optimizer = fabric.setup(model, optimizer)
     train(fabric, model, optimizer, train_data, val_data, out_dir)
 
@@ -157,11 +165,15 @@ def train(
                 val_loss = validate(fabric, model, val_data)
                 fabric.print(f"step {iter_num}: val loss {val_loss:.4f}")
                 fabric.barrier()
+                with open(os.path.join(out_dir, "log.txt"), "a") as file:
+                    file.write(f"iter {iter_num}: val loss {val_loss:.6f}\n")
 
             if step_count % save_interval == 0:
                 print(f"Saving adapter weights to {out_dir}")
                 # TODO: Provide a function/script to merge the adapter weights with pretrained weights
-                save_model_checkpoint(fabric, model, os.path.join(out_dir, f"epoch-{epoch}-iter-{iter_num:06d}.pth"))
+                aligner_path = os.path.join(out_dir, f"epoch-{epoch}-iter-{iter_num:06d}.pth")
+                optimizer_path = os.path.join(out_dir, f"optimizer-epoch-{epoch}-iter-{iter_num:06d}.pth")
+                save_model_checkpoint(fabric, model, optimizer, aligner_path, optimizer_path)
 
         dt = time.time() - t0
         if iter_num % log_interval == 0:
@@ -205,6 +217,9 @@ def validate(fabric: L.Fabric, model: torch.nn.Module, val_data: np.ndarray) -> 
     fabric.print(instruction)
     fabric.print(output)
 
+    with open(os.path.join(out_dir, "log.txt"), "a") as file:
+        file.write(f"\n###Instruction\n{instruction}\n###Response\n{output}\n\n")
+
     model.train()
     return val_loss.item()
 
@@ -241,13 +256,13 @@ def load_datasets(data_dir):
     return train_data, val_data
 
 
-def save_model_checkpoint(fabric, model, file_path):
-    file_path = Path(file_path)
+def save_model_checkpoint(fabric, model, optimizer, aligner_path, optimizer_path):
+    aligner_path = Path(aligner_path)
 
     if isinstance(fabric.strategy, DeepSpeedStrategy):
         from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 
-        tmp_path = file_path.with_suffix(".tmp")
+        tmp_path = aligner_path.with_suffix(".tmp")
         fabric.save(tmp_path, {"model": model})
         fabric.barrier()
         if fabric.global_rank == 0:
@@ -255,12 +270,14 @@ def save_model_checkpoint(fabric, model, file_path):
             # and only keep the adapter weights
             state_dict = get_fp32_state_dict_from_zero_checkpoint(tmp_path)
             state_dict = adapter_state_from_state_dict(state_dict)
-            torch.save(state_dict, file_path)
+            torch.save(state_dict, aligner_path)
+            torch.save(optimizer.state_dict(), optimizer_path)
             shutil.rmtree(tmp_path)
     else:
         state_dict = adapter_state_from_state_dict(model.state_dict())
         if fabric.global_rank == 0:
-            torch.save(state_dict, file_path)
+            torch.save(state_dict, aligner_path)
+            torch.save(optimizer.state_dict(), optimizer_path)
         fabric.barrier()
 
 

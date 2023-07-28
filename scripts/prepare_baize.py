@@ -24,7 +24,7 @@ def prepare(
     destination_path: Path = Path("data/baize"),
     tokenizer_path: Path = Path("checkpoints/lit-llama/tokenizer.model"),
     test_split_ratio: float = 0.1,  # default 90% train, 10% validation
-    max_seq_length: int = 256,
+    max_seq_length: int = 1536,
     seed: int = 42,
 ) -> None:
     """Prepare any dataset for finetuning (akin to Shakespheare full tuning).
