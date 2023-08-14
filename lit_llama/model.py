@@ -136,11 +136,17 @@ class LLaMA(nn.Module):
         return torch.tril(ones).unsqueeze(0).unsqueeze(0)
 
     def reset_cache(self) -> None:
-        self.kv_caches.clear()
-        if self.mask_cache.device.type == "xla":
-            # https://github.com/Lightning-AI/lit-parrot/pull/83#issuecomment-1558150179
-            self.rope_cache = None
-            self.mask_cache = None
+        try:
+            self.kv_caches.clear()
+        except AttributeError:
+            pass
+        try:
+            if self.mask_cache.device.type == "xla":
+                # https://github.com/Lightning-AI/lit-parrot/pull/83#issuecomment-1558150179
+                self.rope_cache = None
+                self.mask_cache = None
+        except AttributeError:
+            pass
 
 
 class Block(nn.Module):

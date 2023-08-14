@@ -26,7 +26,7 @@ wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
 from generate import generate
-from lit_llama.aligner import LLaMA, LLaMAConfig, mark_only_adapter_as_trainable, adapter_state_from_state_dict
+from lit_llama.promptAligner import LLaMA, LLaMAConfig, mark_only_adapter_as_trainable, adapter_state_from_state_dict
 from lit_llama.tokenizer import Tokenizer
 from scripts.prepare_alpaca import generate_prompt
 from lightning.fabric.strategies import DeepSpeedStrategy
@@ -34,24 +34,24 @@ from lightning.fabric.strategies import DeepSpeedStrategy
 
 instruction_tuning = True
 eval_interval = 6000
-save_interval = 350
+save_interval = 3000
 eval_iters = 200
 log_interval = 10
-devices = 1
+devices = 2
 
 # Hyperparameters
-learning_rate = 9e-5
+learning_rate = 9e-4
 batch_size = 32 / devices
-micro_batch_size = 2
+micro_batch_size = 1
 gradient_accumulation_iters = batch_size // micro_batch_size
 assert gradient_accumulation_iters > 0
-epoch_size = 200000  # train dataset size ; alpaca is 50000, isotonic is 280000, baize is 200000
+epoch_size = 300000  # train dataset size ; alpaca is 50000, isotonic is 280000, baize is 200000
 num_epochs = 5
 max_iters = num_epochs * (epoch_size // micro_batch_size) // devices
 weight_decay = 0.02
-max_seq_length = 1536 #alpaca 256, dolly 1024, lima 2048, isotonic 1536 # see scripts/prepare_alpaca.py
-warmup_iters = 1 * (epoch_size // micro_batch_size) // devices  # 2 alpaca epochs
-start_iter = 0
+max_seq_length = 1024 #orca 1024 #alpaca 256, dolly 1024, lima 2048, isotonic 1536 # see scripts/prepare_alpaca.py
+warmup_iters = 1 * (3000 // micro_batch_size) // devices  # 2 alpaca epochs
+start_iter = int(epoch_size * 2.2)
 
 ds_config = {
     "train_micro_batch_size_per_gpu": micro_batch_size,
@@ -60,19 +60,23 @@ ds_config = {
 }
 
 model_size = '7B'
-aligner_length = 10
+aligner_length = 1
 aligner_start_layer = 2
-data_dir = Path("data/baize")
+aligner_generator_length = 10
+aligner_generator_start_layer = 2
+
+path_prefix = Path("/home/shuwen/ziheng/llm/lit-llama")
+data_dir = path_prefix / "data/orca"
 model_base = "lit-llama-2"
-pretrained_path = Path(f"checkpoints/{model_base}/{model_size}/lit-llama.pth")
-previous_aligner_path = "out/aligner/lit-llama-2-baize/7B/10vector-start_layer2-lr9e-05bs32/epoch-5.0-iter-049999.pth"
-previous_optimizer_path = "out/aligner/lit-llama-2-alpaca/7B/1vector-start_layer2-lr0.0001bs16/optimizer-epoch-5.0-iter-000624.pth"
-out_dir = Path(f"out/aligner/{model_base}-{data_dir.name}/{model_size}/{aligner_length}vector-start_layer{aligner_start_layer}-lr{learning_rate}bs{int(batch_size)}/")
+pretrained_path = path_prefix / f"checkpoints/{model_base}/{model_size}/lit-llama.pth"
+previous_aligner_path = "out/promptAligner/lit-llama-2-orca/7B/1vector-start_layer2-lr9e-05bs16/epoch-2.2.pth"
+previous_optimizer_path = ""
+out_dir = path_prefix / f"out/promptAligner/{model_base}-{data_dir.name}/{model_size}/{aligner_length}vector-start_layer{aligner_start_layer}-lr{learning_rate}bs{int(batch_size)}/"
 save_model_name = f"{model_base}-{model_size}-{aligner_length}vector-start_layer{aligner_start_layer}-lr{learning_rate}bs{int(batch_size)}.pth"
 
 print(f"Training LLaMA-Aligner with base model {model_base} using {model_size} parameters on the {data_dir.name} dataset, saving to {out_dir}")
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
 def main():
 
     fabric = L.Fabric(
@@ -91,8 +95,11 @@ def main():
 
     config = LLaMAConfig.from_name(model_size)
     config.block_size = max_seq_length
-    config.adapter_prompt_length = aligner_length
-    config.adapter_start_layer = aligner_start_layer
+    config.aligner_length = aligner_length
+    config.aligner_start_layer = aligner_start_layer
+    config.aligner_generator_length = aligner_generator_length
+    config.aligner_generator_start_layer = aligner_generator_start_layer
+
 
     if not os.path.isfile(pretrained_path):
         raise FileNotFoundError(
@@ -148,9 +155,12 @@ def train(
 
         t0 = time.time()
 
-        input_ids, targets = get_batch(fabric, train_data)
+        system_align_prompt_ids, dialog_ids, targets = get_batch(fabric, train_data)
         with fabric.no_backward_sync(model, enabled=((iter_num + 1) % gradient_accumulation_iters != 0)):
-            logits = model(input_ids)
+            model.set_model_mode(is_aligner=False)
+            aligner_embedding = model(system_align_prompt_ids).to(torch.bfloat16) #suppose we use bf16, otherwise change it
+            model.set_model_mode(is_aligner=True, aligner_embedding=aligner_embedding)
+            logits = model(dialog_ids)
             loss = loss_fn(logits, targets)
             fabric.backward(loss / gradient_accumulation_iters)
 
@@ -169,8 +179,8 @@ def train(
             if step_count % save_interval == 0:
                 print(f"Saving adapter weights to {out_dir}")
                 # TODO: Provide a function/script to merge the adapter weights with pretrained weights
-                aligner_path = os.path.join(out_dir, f"epoch-{epoch:.1f}-iter-{iter_num:06d}.pth")
-                optimizer_path = os.path.join(out_dir, f"optimizer-epoch-{epoch:.1f}-iter-{iter_num:06d}.pth")
+                aligner_path = os.path.join(out_dir, f"epoch-{epoch:.1f}.pth")
+                optimizer_path = os.path.join(out_dir, f"optimizer-epoch-{epoch:.1f}.pth")
                 save_model_checkpoint(fabric, model, optimizer, aligner_path, optimizer_path)
 
         dt = time.time() - t0
@@ -208,20 +218,23 @@ def validate(fabric: L.Fabric, model: torch.nn.Module, val_data: np.ndarray) -> 
     model.eval()
     losses = torch.zeros(eval_iters)
     for k in range(eval_iters):
-        input_ids, targets = get_batch(fabric, val_data)
-        logits = model(input_ids)
+        system_align_prompt_ids, dialog_ids, targets = get_batch(fabric, val_data)
+        model.set_model_mode(is_aligner=False)
+        aligner_embedding = model(system_align_prompt_ids).to(torch.bfloat16) #suppose we use bf16, otherwise change it
+        model.set_model_mode(is_aligner=True, aligner_embedding=aligner_embedding)
+        logits = model(dialog_ids)        
         loss = loss_fn(logits, targets)
         losses[k] = loss.item()
     val_loss = losses.mean()
 
-    # produce an example:
-    instruction = "Recommend a movie for me to watch during the weekend and explain the reason."
-    output = generate_response(model, instruction)
-    fabric.print(instruction)
-    fabric.print(output)
+    # # produce an example:
+    # instruction = "Recommend a movie for me to watch during the weekend and explain the reason."
+    # output = generate_response(model, instruction)
+    # fabric.print(instruction)
+    # fabric.print(output)
 
-    with open(os.path.join(out_dir, "log.txt"), "a") as file:
-        file.write(f"\n###Instruction\n{instruction}\n###Response\n{output}\n\n")
+    # with open(os.path.join(out_dir, "log.txt"), "a") as file:
+    #     file.write(f"\n###Instruction\n{instruction}\n###Response\n{output}\n\n")
 
     model.train()
     return val_loss.item()
@@ -234,23 +247,31 @@ def loss_fn(logits, targets):
     return loss
     
 
-def get_batch(fabric: L.Fabric, data: list):
+def get_batch(fabric: L.Fabric, data: list, max_seq_len: int = max_seq_length):
     ix = torch.randint(len(data), (micro_batch_size,))
 
-    input_ids = [data[i]["input_ids"].type(torch.int64) for i in ix]
+    system_align_prompt_ids = [data[i]["system_align_prompt_ids"].type(torch.int64) for i in ix]
+    dialog_ids = [data[i]["dialog_ids"].type(torch.int64) for i in ix]
     labels = [data[i]["labels"].type(torch.int64) for i in ix]
 
-    max_len = max(len(s) for s in input_ids)
+    max_len_system_align_prompt = max(len(s) for s in system_align_prompt_ids)
+    max_len_dialog = min(max(len(s) for s in dialog_ids), max_seq_len)
 
-    def pad_right(x, pad_id):
-        # pad right based on the longest sequence
-        n = max_len - len(x)
-        return torch.cat((x, torch.full((n,), pad_id, dtype=x.dtype)))
-
-    x = torch.stack([pad_right(x, pad_id=0) for x in input_ids])
-    y = torch.stack([pad_right(x, pad_id=-1) for x in labels])
-    x, y = fabric.to_device((x.pin_memory(), y.pin_memory()))
-    return x, y
+    def pad_right(x, pad_id, max_len):
+        x = torch.tensor(x, dtype=x.dtype)
+        if len(x) > max_len:
+            #truncate based on max length
+            return x[:max_len]
+        else:
+            # pad right based on the longest sequence
+            n = max_len - len(x)
+            return torch.cat((x, torch.full((n,), pad_id, dtype=x.dtype)))
+        
+    system_align_prompt_ids = torch.stack([pad_right(x, pad_id=0, max_len=max_len_system_align_prompt) for x in system_align_prompt_ids])
+    x = torch.stack([pad_right(x, pad_id=0, max_len=max_len_dialog) for x in dialog_ids])
+    y = torch.stack([pad_right(x, pad_id=-1, max_len=max_len_dialog) for x in labels])
+    system_align_prompt_ids, x, y = fabric.to_device((system_align_prompt_ids.pin_memory(), x.pin_memory(), y.pin_memory()))
+    return system_align_prompt_ids, x, y
 
 
 def load_datasets(data_dir):

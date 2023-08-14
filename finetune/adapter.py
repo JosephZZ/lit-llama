@@ -40,9 +40,9 @@ log_interval = 1
 devices = 1
 
 # Hyperparameters
-learning_rate = 9e-5
+learning_rate = 9e-3
 batch_size = 64 / devices
-micro_batch_size = 16
+micro_batch_size = 4
 gradient_accumulation_iters = batch_size // micro_batch_size
 assert gradient_accumulation_iters > 0
 epoch_size = 50000  # train dataset size
@@ -69,7 +69,7 @@ def main(
         accelerator="cuda", 
         devices=devices, 
         strategy=(DeepSpeedStrategy(config=ds_config) if devices > 1 else "auto"), 
-        precision="bf16-true",
+        precision="32-true",
     )
     fabric.launch()
     fabric.seed_everything(1337 + fabric.global_rank)
