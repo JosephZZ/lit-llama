@@ -12,7 +12,7 @@ import json
 from torch.utils.data import random_split
 from lit_llama.tokenizer import Tokenizer
 from tqdm import tqdm
-
+import numpy as np
 
 DATA_FILE = "https://raw.githubusercontent.com/tloen/alpaca-lora/main/alpaca_data_cleaned_archive.json"
 DATA_FILE_NAME = "alpaca_data_cleaned_archive.json"
@@ -20,9 +20,10 @@ IGNORE_INDEX = -1
 
 
 def prepare(
-    destination_path: Path = Path("data/alpaca"), 
-    tokenizer_path: Path = Path("checkpoints/lit-llama/tokenizer.model"),
+    destination_path: Path = Path("data/alpaca1k256"), 
+    tokenizer_path: Path = Path("checkpoints/lit-llama-2/tokenizer.model"),
     test_split_size: int = 2000,
+    number_of_train: int = 1000, #None for all
     max_seq_length: int = 256,
     seed: int = 42,
     mask_inputs: bool = False,  # as in alpaca-lora
@@ -44,6 +45,18 @@ def prepare(
     with open(file_path, "r") as file:
         data = json.load(file)
 
+
+    sample_full_length = [count_sample_length(sample) for sample in data]
+    print(f"Loaded a total of {len(sample_full_length)} samples")
+    # Calculate and print the percentiles
+    print("25th percentile: ", np.percentile(sample_full_length, 25))
+    print("50th percentile: ", np.percentile(sample_full_length, 50))
+    print("75th percentile: ", np.percentile(sample_full_length, 75))
+    print("85th percentile: ", np.percentile(sample_full_length, 85))
+    print("95th percentile: ", np.percentile(sample_full_length, 95))
+    print("99th percentile: ", np.percentile(sample_full_length, 99))
+    print("max one: ", max(sample_full_length))
+
     # Partition the dataset into train and test
     train_split_size = len(data) - test_split_size
     train_set, test_set = random_split(
@@ -51,7 +64,7 @@ def prepare(
         lengths=(train_split_size, test_split_size),
         generator=torch.Generator().manual_seed(seed),
     )
-    train_set, test_set = list(train_set), list(test_set)
+    train_set, test_set = list(train_set)[:number_of_train], list(test_set)
 
     print(f"train has {len(train_set):,} samples")
     print(f"val has {len(test_set):,} samples")
@@ -72,6 +85,10 @@ def download(file_path: Path):
     with open(file_path, "w") as f:
         f.write(requests.get(DATA_FILE).text)
 
+def count_sample_length(example):
+    full_prompt = generate_prompt(example)
+    full_prompt_and_response = full_prompt + example["output"]
+    return len(full_prompt_and_response)
 
 def prepare_sample(example: dict, tokenizer: Tokenizer, max_length: int, mask_inputs: bool = True):
     """Processes a single sample.

@@ -24,7 +24,7 @@ def main(
     input: str = "",
     adapter_path: Path = Path("out/adapter_v2/alpaca/lit-llama-adapter-finetuned.pth"),
     pretrained_path: Path = Path("checkpoints/lit-llama/7B/lit-llama.pth"),
-    tokenizer_path: Path = Path("checkpoints/lit-llama/tokenizer.model"),
+    tokenizer_path: Path = Path("checkpoints/lit-llama-2/tokenizer.model"),
     quantize: Optional[str] = None,
     max_new_tokens: int = 100,
     top_k: int = 200,

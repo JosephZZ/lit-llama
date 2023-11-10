@@ -15,6 +15,7 @@ from lit_llama import LLaMA, Tokenizer
 from lit_llama.utils import quantization
 from scripts.prepare_alpaca import generate_prompt
 from generate import generate
+from lightning.fabric.strategies import DeepSpeedStrategy
 
 
 def main(
@@ -24,8 +25,8 @@ def main(
     max_new_tokens: int = 100,
     top_k: int = 200,
     temperature: float = 0.7,
-    checkpoint_path: Optional[Path] = None,
-    tokenizer_path: Path = Path("checkpoints/lit-llama/tokenizer.model"),
+    checkpoint_path: Optional[Path] = Path("checkpoints/lit-llama-2/7B/lit-llama.pth"),
+    tokenizer_path: Path = Path("checkpoints/lit-llama-2/tokenizer.model"),
     model_size: str = "7B",
     quantize: Optional[str] = None,
 ) -> None:
@@ -52,6 +53,20 @@ def main(
 
     precision = "bf16-true" if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else "32-true"
     fabric = L.Fabric(devices=1, precision=precision)
+
+    # devices=2
+    # ds_config = {
+    #     "tensor_parallel": {"stage": 2},
+    # }
+    # fabric = L.Fabric(
+    #     accelerator="cuda", 
+    #     devices=devices, 
+    #     strategy=(DeepSpeedStrategy(config=ds_config) if devices > 1 else "auto"), 
+    #     precision="bf16-true",
+    # )
+    # fabric.launch()
+    # fabric.seed_everything(1337 + fabric.global_rank)
+
 
     print("Loading model ...", file=sys.stderr)
     t0 = time.time()

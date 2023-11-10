@@ -17,17 +17,17 @@ sys.path.append(str(wd))
 
 from generate import generate
 from lit_llama import Tokenizer
-from lit_llama.adapter_v2 import LLaMA
 from lit_llama.utils import lazy_load, llama_model_lookup, quantization
 from scripts.prepare_alpaca import generate_multi_turn_prompt
 
-
+from lit_llama.adapter import LLaMA
+# from lit_llama.adapter_v2 import LLaMA
 
 
 def main(
     prompt: str = "What food do lamas eat?",
     input: str = "",
-    aligner_path: Path = Path("out/adapter_v2/llama2-alpaca/lit-llama-adapter-finetuned.pth"),
+    aligner_path: Path = Path("out/adapter/redo/lit-llama-2-alpaca512/7B/lr0.009bs64.0wd0.02wu2/epoch-15.0-valloss0.8628.pth"),
     pretrained_path: Path = Path("checkpoints/lit-llama-2/7B/lit-llama.pth"),
     tokenizer_path: Path = Path("checkpoints/lit-llama-2/tokenizer.model"),
     aligner_length: int = 1,
@@ -35,7 +35,7 @@ def main(
     max_new_tokens: int = 100,
     top_k: int = 200,
     temperature: float = 0.7,
-    question_file: Path = Path("/home/ziheng/ssd-drive1/projects/llm/lit-llama/data/evaluation/Vicuna_questions.jsonl"),
+    question_file: Path = Path("/home/shuwen/ziheng/llm/lit-llama/data/evaluation/Vicuna_questions.jsonl"),
     num_choices: int = 1,
 ) -> None:
     """Generates a response based on a given instruction and an optional input.
@@ -96,7 +96,7 @@ def main(
 
         model.reset_cache()
         output = tokenizer.decode(y)
-        output = output.split("### Response:")[1].strip()
+        output = output.split("### Response:")[1].split("### Instruction")[0].strip()
         print(output)
 
         tokens_generated = y.size(0) - prompt_length
@@ -127,7 +127,7 @@ def main(
                         model.reset_cache()
                         output = tokenizer.decode(y)
                         print('could decode ', output)
-                        last_response = output.split("### Response:")[-1].strip()
+                        last_response = output.split("### Response:")[1].split("### Instruction")[0].strip()
                         print(last_response)
 
                     except RuntimeError as e:

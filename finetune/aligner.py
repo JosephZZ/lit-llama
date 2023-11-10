@@ -16,7 +16,7 @@ import sys
 import time
 from pathlib import Path
 import shutil
-
+from datetime import datetime
 import lightning as L
 import numpy as np
 import torch
@@ -32,26 +32,29 @@ from scripts.prepare_alpaca import generate_prompt
 from lightning.fabric.strategies import DeepSpeedStrategy
 
 
-instruction_tuning = True
-eval_interval = 6000
-save_interval = 350
-eval_iters = 200
-log_interval = 10
+
 devices = 1
 
 # Hyperparameters
-learning_rate = 9e-5
-batch_size = 32 / devices
-micro_batch_size = 2
+learning_rate = 9e-3
+batch_size = 64 // devices
+micro_batch_size = 1
 gradient_accumulation_iters = batch_size // micro_batch_size
 assert gradient_accumulation_iters > 0
-epoch_size = 200000  # train dataset size ; alpaca is 50000, isotonic is 280000, baize is 200000
-num_epochs = 5
-max_iters = num_epochs * (epoch_size // micro_batch_size) // devices
+epoch_size = 160000  # train dataset size ; alpaca is 50000, isotonic is 280000, baize is 200000
+num_epochs = 2
+max_iters = int(num_epochs * (epoch_size // micro_batch_size) // devices)
 weight_decay = 0.02
-max_seq_length = 1536 #alpaca 256, dolly 1024, lima 2048, isotonic 1536 # see scripts/prepare_alpaca.py
-warmup_iters = 1 * (epoch_size // micro_batch_size) // devices  # 2 alpaca epochs
-start_iter = 0
+max_seq_length = 2048 #alpaca 256, dolly 1024, lima 2048, isotonic 1536 # see scripts/prepare_alpaca.py
+warmup_epoch = 1
+warmup_iters = warmup_epoch * (epoch_size // micro_batch_size) // devices  # 2 alpaca epochs
+start_iter = int(0)
+
+instruction_tuning = True
+eval_interval = 0.1 * epoch_size // batch_size
+save_interval = 1 * epoch_size // batch_size
+eval_iters = 200
+log_interval = 10
 
 ds_config = {
     "train_micro_batch_size_per_gpu": micro_batch_size,
@@ -59,20 +62,22 @@ ds_config = {
     "zero_optimization": {"stage": 2},
 }
 
+safer_or_better = 'safer'
 model_size = '7B'
-aligner_length = 10
+aligner_length = 1
 aligner_start_layer = 2
-data_dir = Path("data/baize")
+data_dir = Path("data/beaver_safe2")
 model_base = "lit-llama-2"
-pretrained_path = Path(f"checkpoints/{model_base}/{model_size}/lit-llama.pth")
-previous_aligner_path = "out/aligner/lit-llama-2-baize/7B/10vector-start_layer2-lr9e-05bs32/epoch-5.0-iter-049999.pth"
-previous_optimizer_path = "out/aligner/lit-llama-2-alpaca/7B/1vector-start_layer2-lr0.0001bs16/optimizer-epoch-5.0-iter-000624.pth"
-out_dir = Path(f"out/aligner/{model_base}-{data_dir.name}/{model_size}/{aligner_length}vector-start_layer{aligner_start_layer}-lr{learning_rate}bs{int(batch_size)}/")
-save_model_name = f"{model_base}-{model_size}-{aligner_length}vector-start_layer{aligner_start_layer}-lr{learning_rate}bs{int(batch_size)}.pth"
+model_version = model_size
+pretrained_path = Path(f"checkpoints/{model_base}/{model_version}/lit-llama.pth")
+previous_aligner_path = ""
+previous_optimizer_path = ""
+out_dir = Path(f"out/aligner/{model_base}-{data_dir.name}/{model_version}/{aligner_length}vector-start_layer{aligner_start_layer}-lr{learning_rate}bs{int(batch_size)}weightDecay{weight_decay}wu{warmup_epoch}/")
+save_model_name = f"{model_base}-{model_version}-{aligner_length}vector-start_layer{aligner_start_layer}-lr{learning_rate}bs{int(batch_size)}wu{warmup_epoch}.pth"
 
-print(f"Training LLaMA-Aligner with base model {model_base} using {model_size} parameters on the {data_dir.name} dataset, saving to {out_dir}")
+print(f"Training LLaMA-Aligner with base model {model_base} using {model_version} parameters on the {data_dir.name} dataset, saving to {out_dir}")
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 def main():
 
     fabric = L.Fabric(
@@ -110,7 +115,7 @@ def main():
 
     print("aligner length: ",model.config.adapter_prompt_length)
 
-    mark_only_adapter_as_trainable(model)
+    # mark_only_adapter_as_trainable(model)
 
     num_params = sum([p.numel() for p in model.parameters() if p.requires_grad])
     print(f"Number of trainable parameters: {num_params}")
@@ -163,23 +168,24 @@ def train(
                 val_loss = validate(fabric, model, val_data)
                 fabric.print(f"step {iter_num}: val loss {val_loss:.4f}")
                 fabric.barrier()
-                with open(os.path.join(out_dir, "log.txt"), "a") as file:
+                with open(os.path.join(out_dir, "val log.txt"), "a") as file:
                     file.write(f"iter {iter_num}: val loss {val_loss:.6f}\n")
 
             if step_count % save_interval == 0:
                 print(f"Saving adapter weights to {out_dir}")
                 # TODO: Provide a function/script to merge the adapter weights with pretrained weights
-                aligner_path = os.path.join(out_dir, f"epoch-{epoch:.1f}-iter-{iter_num:06d}.pth")
-                optimizer_path = os.path.join(out_dir, f"optimizer-epoch-{epoch:.1f}-iter-{iter_num:06d}.pth")
+                aligner_path = os.path.join(out_dir, f"epoch-{epoch:.1f}-valloss{val_loss:.4f}")
+                optimizer_path = os.path.join(out_dir, f"optimizer-epoch-{epoch:.1f}-valloss{val_loss:.4f}.pth")
                 save_model_checkpoint(fabric, model, optimizer, aligner_path, optimizer_path)
 
         dt = time.time() - t0
         if iter_num % log_interval == 0:
-            fabric.print(f"iter {iter_num}: loss {loss.item():.4f}, time: {dt*1000:.2f}ms, model_name:{out_dir}")
-    
+            fabric.print(f"epoch-{epoch:.1f} iter {iter_num}: loss {loss.item():.4f}, time: {dt*1000:.2f}ms, model_name:{out_dir}")
+            with open(os.path.join(out_dir, "train_log.txt"), "a") as file:
+                file.write(f"epoch-{epoch:.1f} iter {iter_num}: train loss {loss.item():.6f} {datetime.now()}\n")
         # Save the final checkpoint at the end of training
-    aligner_path = os.path.join(out_dir, f"epoch-{epoch:.1f}-iter-{iter_num:06d}.pth")
-    optimizer_path = os.path.join(out_dir, f"optimizer-epoch-{epoch:.1f}-iter-{iter_num:06d}.pth")
+    aligner_path = os.path.join(out_dir, f"final.pth")
+    optimizer_path = os.path.join(out_dir, f"optimizer-final-epoch-{epoch:.1f}--valloss{val_loss:.4f}.pth")
     save_model_checkpoint(fabric, model,  optimizer, aligner_path, optimizer_path)
 
 
@@ -215,7 +221,7 @@ def validate(fabric: L.Fabric, model: torch.nn.Module, val_data: np.ndarray) -> 
     val_loss = losses.mean()
 
     # produce an example:
-    instruction = "Recommend a movie for me to watch during the weekend and explain the reason."
+    instruction = "How to rob a bank?"
     output = generate_response(model, instruction)
     fabric.print(instruction)
     fabric.print(output)
@@ -237,8 +243,24 @@ def loss_fn(logits, targets):
 def get_batch(fabric: L.Fabric, data: list):
     ix = torch.randint(len(data), (micro_batch_size,))
 
-    input_ids = [data[i]["input_ids"].type(torch.int64) for i in ix]
-    labels = [data[i]["labels"].type(torch.int64) for i in ix]
+    if "philo" in data_dir.name or "orca" in data_dir.name:
+        input_ids = [data[i]["dialog_ids"].type(torch.int64) for i in ix]
+        labels = [data[i]["labels"].type(torch.int64) for i in ix]  
+    elif "hh" in data_dir.name:
+        input_ids_chosen = [data[i]["chosen"].type(torch.int64) for i in ix]
+        input_ids_rejected = [data[i]["rejected"].type(torch.int64) for i in ix]
+        input_ids = input_ids_chosen + input_ids_rejected
+        labels = [i.clone() for i in input_ids]
+    elif "beaver" in data_dir.name:
+        if safer_or_better == 'safer':
+            using_index = "safer_response_id"
+        elif safer_or_better == "better":
+            using_index = "better_response_id"
+        input_ids = [ data[i][f"dialog_{data[i][using_index]}"].type(torch.int64) for i in ix]
+        labels = [i.clone() for i in input_ids]
+    else:
+        input_ids = [data[i]["input_ids"].type(torch.int64) for i in ix]
+        labels = [data[i]["labels"].type(torch.int64) for i in ix]
 
     max_len = max(len(s) for s in input_ids)
 

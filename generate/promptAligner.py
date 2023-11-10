@@ -13,18 +13,23 @@ sys.path.append(str(wd))
 
 from generate import generate
 from lit_llama import Tokenizer
-from lit_llama.promptAligner import LLaMA
 from lit_llama.utils import lazy_load, llama_model_lookup, quantization
 
+promptAligner_version = "V2"
+if promptAligner_version == "V2":
+    from lit_llama.promptAlignerV2 import LLaMA, LLaMAConfig, mark_only_adapter_as_trainable, adapter_state_from_state_dict
+else:
+    from lit_llama.promptAligner import LLaMA, LLaMAConfig, mark_only_adapter_as_trainable, adapter_state_from_state_dict
+
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 def main(
-    prompt: str = "How to rob a bank?",
+    prompt: str = "What is the relationship between morality and law?",
     input: str = "",
-    system_align_prompt: str = "You are a smart assistant that reasons step by step.",
-    aligner_path: Path = Path("out/promptAligner/lit-llama-2-orca/7B/1vector-start_layer2-lr9e-05bs16/epoch-1.6.pth"),
-    pretrained_path: Path = Path("checkpoints/lit-llama-2/7B/lit-llama.pth"),
+    system_align_prompt: str = "Michel Foucault (1926-1984 CE): A French philosopher, known for his critical studies of social institutions, including mental institutions, prisons, and the sciences.\nYou are an assistant taking on the perspective and value of this person.",
+    aligner_path: Path = Path("out/promptAlignerV2/lit-llama-2-philosopherQA_mydata/7b-chat/1vector-start_layer2-lr0.009bs16/epoch-1.0.pth"),
+    pretrained_path: Path = Path("checkpoints/lit-llama-2/7b-chat/lit-llama.pth"),
     tokenizer_path: Path = Path("checkpoints/lit-llama-2/tokenizer.model"),
     quantize: Optional[str] = None,
     max_new_tokens: int = 100,
@@ -97,10 +102,10 @@ def main(
         system_align_prompt_encoded = torch.stack([system_align_prompt_encoded])
         t0 = time.perf_counter()
         model.set_model_mode(is_aligner=False)
-        aligner_embedding = model(system_align_prompt_encoded).to(torch.bfloat16) #suppose we use bf16, otherwise change it
-        
+        aligner_embedding, _ = model(system_align_prompt_encoded) #suppose we use bf16, otherwise change it
+        print("aligner_embedding:", aligner_embedding)
         t1 = time.perf_counter()
-        model.set_model_mode(is_aligner=True, aligner_embedding=aligner_embedding)
+        model.set_model_mode(is_aligner=True, aligner_embedding=aligner_embedding.to(torch.bfloat16))
         y = generate(model, prompt_encoded, max_new_tokens, temperature=temperature, top_k=top_k, eos_id=tokenizer.eos_id)
         t = time.perf_counter() - t1
 

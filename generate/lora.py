@@ -15,23 +15,37 @@ from generate import generate
 from lit_llama import Tokenizer, LLaMA
 from lit_llama.lora import lora
 from lit_llama.utils import lazy_load, llama_model_lookup
-from scripts.prepare_alpaca import generate_prompt
+import json
 
-lora_r = 8
-lora_alpha = 16
-lora_dropout = 0.05
+beaver_safety_eval_question_path = Path("data/evaluation/beaver_safety_eval_questions.json")
 
 
+
+# 40
+#15
+#11
+#150
 def main(
-    prompt: str = "What food do lamas eat?",
+    prompt: str = "In five years, Grant will be 2/3 the age of the hospital that he is hired into. If Grant is currently 25 years old, how old is the hospital now? \
+          [NewPrompt] If Dan is learning to screen-print t-shirts and in the first hour he makes one t-shirt every 12 minutes, and in the second hour, he makes one every 6 minutes, how many t-shirts does he make in total over the course of those two hours? \
+          [NewPrompt] When four positive integers are divided by $11$, the remainders are $2,$ $4,$ $6,$ and $8,$ respectively.\n\nWhen the sum of the four integers is divided by X$, what is the remainder?\nIf we know the answer to the above question is 9, what is the value of unknown variable X? \
+          [NewPrompt] If there are 250 days per year on planet Orbius-5, and each year is divided into 5 seasons, and an astronaut from Earth stays on Orbius-5 for 3 seasons before returning to Earth, what is the total number of days the astronaut will spend on Orbius-5? \
+          ",
     input: str = "",
-    lora_path: Path = Path("out/lora/alpaca/lit-llama-lora-finetuned.pth"),
-    pretrained_path: Path = Path("checkpoints/lit-llama/7B/lit-llama.pth"),
-    tokenizer_path: Path = Path("checkpoints/lit-llama/tokenizer.model"),
+    lora_path: Path = Path("out/lora/lit-llama-2-metaMath/7B/lora_r128_alpha16_dropout0.05_lr0.0001_bs64_epoch10/epoch-7.5-valloss0.4835.pth"),
+    pretrained_path: Path = Path("checkpoints/lit-llama-2/7B/lit-llama.pth"),
+    tokenizer_path: Path = Path("checkpoints/lit-llama-2/tokenizer.model"),
+    question_file = None, 
+    is_save_results_to_file = False,
+    is_beaver_safety_eval = False,
     quantize: Optional[str] = None,
-    max_new_tokens: int = 100,
+    max_new_tokens: int = 300,
     top_k: int = 200,
-    temperature: float = 0.8,
+    instruct_style: str = "metaMath", # or "alpaca"
+    temperature: float = 0.2,
+    lora_r = 128,
+    lora_alpha = 16,
+    lora_dropout = 0.05,
 ) -> None:
     """Generates a response based on a given instruction and an optional input.
     This script will only work with checkpoints from the instruction-tuned LoRA model.
@@ -82,28 +96,95 @@ def main(
     model = fabric.setup(model)
 
     tokenizer = Tokenizer(tokenizer_path)
-    sample = {"instruction": prompt, "input": input}
-    prompt = generate_prompt(sample)
-    encoded = tokenizer.encode(prompt, bos=True, eos=False, device=model.device)
 
-    t0 = time.perf_counter()
-    output = generate(
-        model,
-        idx=encoded,
-        max_new_tokens=max_new_tokens,
-        temperature=temperature,
-        top_k=top_k,
-        eos_id=tokenizer.eos_id
-    )
-    t = time.perf_counter() - t0
+    if is_beaver_safety_eval:
+        question_file = beaver_safety_eval_question_path
+        is_save_results_to_file = True
+    
+    if question_file:
+        samples = extract_prompts_from_file(question_file)
+    else:
+        samples = extract_prompts_from_input(prompt, input)
 
-    output = tokenizer.decode(output)
-    output = output.split("### Response:")[1].strip()
-    print(output)
+    
+    for sample in samples:
+        prompt = generate_prompt(sample, instruct_style)
+        encoded = tokenizer.encode(prompt, bos=True, eos=False, device=model.device)
+        prompt_length = encoded.size(0)
 
-    print(f"\n\nTime for inference: {t:.02f} sec total, {max_new_tokens / t:.02f} tokens/sec", file=sys.stderr)
-    if fabric.device.type == "cuda":
-        print(f"Memory used: {torch.cuda.max_memory_reserved() / 1e9:.02f} GB", file=sys.stderr)
+        t0 = time.perf_counter()
+        y = generate(model, encoded, max_new_tokens, temperature=temperature, top_k=top_k, eos_id=tokenizer.eos_id)
+        t = time.perf_counter() - t0
+
+        model.reset_cache()
+        output = tokenizer.decode(y)
+        
+        print(output)
+
+        # output = output.split("### Response:")[1].split("### Instruction")[0].strip()
+        # sample["response"] = output
+        # sample["model"] = str(lora_path)
+
+        tokens_generated = y.size(0) - prompt_length
+        print(f"\n\nTime for inference: {t:.02f} sec total, {tokens_generated / t:.02f} tokens/sec", file=sys.stderr)
+        if fabric.device.type == "cuda":
+            print(f"Memory used: {torch.cuda.max_memory_reserved() / 1e9:.02f} GB", file=sys.stderr)
+
+    if is_save_results_to_file:
+        #file path is where the aligner path folder is and the name is the question file name + "_results.json"
+        file_path = lora_path.parent / (question_file.stem + "_results.json")
+
+        with open(file_path, "w") as f:
+            json.dump(samples, f, indent=4)
+        print("Results saved to ", file_path)
+
+
+def generate_prompt(example, instruct_style):
+    """Generates a standardized message to prompt the model with an instruction, optional input and a
+    'response' field."""
+    if instruct_style == "alpaca":
+        if example["input"]:
+            return (
+                "Below is an instruction that describes a task, paired with an input that provides further context. "
+                "Write a response that appropriately completes the request.\n\n"
+                f"### Instruction:\n{example['instruction']}\n\n### Input:\n{example['input']}\n\n### Response:"
+            )
+        return (
+            "Below is an instruction that describes a task. "
+            "Write a response that appropriately completes the request.\n\n"
+            f"### Instruction:\n{example['instruction']}\n\n### Response:"
+        )
+    elif instruct_style == "orca" or instruct_style == "metaMath":
+        return "[|User|] "+ example['instruction']+" [|AI Assistant|] "
+    elif instruct_style == "beaver":
+        return "[User] "+ example['instruction']+" [Assistant] "
+    elif instruct_style == 'hh':
+        return "Human: " + example['instruction'] + " Assistant: "
+    else:
+        raise ValueError(f"Unknown instruction style: {instruct_style}")
+    
+def extract_prompts_from_file(file_name):
+    # load json file
+    with open(file_name) as f:
+        data = json.load(f)
+    # extract prompts
+    samples = []
+    for d in data:
+        try:
+            sample = {"instruction": d["prompt"], "input": d["input"]}
+        except:
+            sample = {"instruction": d["prompt"], "input": ""}
+        samples.append(sample)
+    return samples
+
+def extract_prompts_from_input(prompts, inputs):
+    prompts = prompts.split("[NewPrompt]")
+    inputs = inputs.split("[NewPrompt]")
+    if len(prompts) == len(inputs):
+        samples = [{"instruction": p.strip(), "input": i.strip()} for p, i in zip(prompts, inputs)]
+    else:
+        samples = [{"instruction": p.strip(), "input": ""} for p in prompts]
+    return samples
 
 
 if __name__ == "__main__":

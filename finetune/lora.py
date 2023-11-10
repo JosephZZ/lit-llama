@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 import os
 import time
+from datetime import datetime
 
 import lightning as L
 import numpy as np
@@ -23,33 +24,63 @@ from lit_llama.model import LLaMA, LLaMAConfig
 from lit_llama.tokenizer import Tokenizer
 from scripts.prepare_alpaca import generate_prompt
 
+import os
+# os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
+## for 7B
+# lora has trainable parameter number: 4194304 (with lora_r = 8)
+# 8388608 (lora_r = 16)
+# 2097152 (lora_r = 4)
+## for 13B
+# 6553600 (lora_r = 8)
 instruction_tuning = True
-eval_interval = 100
-save_interval = 100
-eval_iters = 100
-log_interval = 1
+devices = 1
 
 # Hyperparameters
-learning_rate = 9e-5
+epoch_size = 395000
+learning_rate = 1e-4
 batch_size = 64
-micro_batch_size = 16
+micro_batch_size = 4
 gradient_accumulation_iters = batch_size // micro_batch_size
 assert gradient_accumulation_iters > 0
-max_iters = 50000 * 10 // micro_batch_size
-weight_decay = 0.0
-max_seq_length = 256  # see scripts/prepare_alpaca.py
-lora_r = 8
+epoch_num = 10
+max_iters = epoch_size * epoch_num // micro_batch_size
+weight_decay = 0.02
+max_seq_length = 1536  # see scripts/prepare_alpaca.py
+lora_r = 128
 lora_alpha = 16
 lora_dropout = 0.05
-warmup_iters = 100
+warmup_epoch = 0.1
+warmup_iters = warmup_epoch * (epoch_size // micro_batch_size) // devices  # 2 alpaca epochs
 
+data_name = "metaMath"
+data_dir: str = Path(f"data/{data_name}")
+model_base = "lit-llama-2"
+model_version = "7B"
+pretrained_path: str = f"checkpoints/{model_base}/{model_version}/lit-llama.pth"
+tokenizer_path: str = f"checkpoints/{model_base}/tokenizer.model"
+out_dir: str = f"out/lora/{model_base}-{data_name}/{model_version}/lora_r{lora_r}_alpha{lora_alpha}_dropout{lora_dropout}_lr{learning_rate}_bs{batch_size}_epoch{epoch_num}_warmup{warmup_epoch}"
+
+previous_checkpoing = ""
+# "out/lora/lit-llama-decapoda-alpaca512/7B/lora_r8_alpha16_dropout0.05_lr0.0003_bs64_epoch2/iter-051967-ckpt.pth"
+# "out/lora/lit-llama-decapoda-alpaca512/7B/lora_r8_alpha16_dropout0.05_lr0.0003_bs32_epoch2/iter-103999-ckpt.pth"
+previous_optimizer = ""
+# "out/lora/lit-llama-decapoda-alpaca512/7B/lora_r8_alpha16_dropout0.05_lr0.0003_bs64_epoch2/optimizer-iter-051967-ckpt.pth"
+#"out/lora/lit-llama-decapoda-alpaca512/7B/lora_r8_alpha16_dropout0.05_lr0.0003_bs32_epoch2/optimizer-iter-103999-ckpt.pth"
+start_iter = 0 * epoch_size // micro_batch_size
+
+safer_or_better = 'safer'
+
+eval_interval =  0.1*epoch_size // batch_size
+save_interval = 0.5*epoch_size // batch_size
+eval_iters =  30 if "lima" in data_name else 200
+log_interval = 10
+
+
+print(f"Training LoRA with base model {pretrained_path} on the {data_dir.name} dataset, saving to {out_dir}")
 
 def main(
-    data_dir: str = "data/alpaca", 
-    pretrained_path: str = "checkpoints/lit-llama-2/7B/lit-llama.pth",
-    tokenizer_path: str = "checkpoints/lit-llama-2/tokenizer.model",
-    out_dir: str = "out/lora/llama2-alpaca",
+
 ):
 
     fabric = L.Fabric(accelerator="cuda", devices=1, precision="bf16-true")
@@ -61,7 +92,7 @@ def main(
 
     train_data, val_data = load_datasets(data_dir=data_dir)
 
-    config = LLaMAConfig.from_name("7B")
+    config = LLaMAConfig.from_name(model_version)
     config.block_size = max_seq_length
 
     checkpoint = torch.load(pretrained_path)
@@ -70,10 +101,15 @@ def main(
         model = LLaMA(config)
         # strict=False because missing keys due to LoRA weights not contained in checkpoint state
         model.load_state_dict(checkpoint, strict=False)
+        if previous_checkpoing:
+            model.load_state_dict(torch.load(previous_checkpoing), strict=False)
     
     mark_only_lora_as_trainable(model)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    if previous_optimizer:
+        optimizer.load_state_dict(torch.load(previous_optimizer))
+
     model, optimizer = fabric.setup(model, optimizer)
     train(fabric, model, optimizer, train_data, val_data, tokenizer_path, out_dir)
 
@@ -97,7 +133,8 @@ def train(
     """
     step_count = 0
 
-    for iter_num in range(max_iters):
+    for iter_num in range(start_iter, max_iters):
+        epoch = iter_num * micro_batch_size / epoch_size
 
         if step_count <= warmup_iters:
             # linear warmup
@@ -120,20 +157,23 @@ def train(
                 
             if step_count % eval_interval == 0:
                 val_loss = validate(fabric, model, val_data, tokenizer_path)
-                fabric.print(f"step {iter_num}: val loss {val_loss:.4f}")
+                fabric.print(f"epoch {epoch:.1f} step {iter_num}: val loss {val_loss:.4f}")
                 fabric.barrier()
+                with open(os.path.join(out_dir, "val log.txt"), "a") as file:
+                    file.write(f"epoch {epoch:.1f} iter {iter_num}: val loss {val_loss:.6f}\n")
 
             if step_count % save_interval == 0:
                 print(f"Saving LoRA weights to {out_dir}")
                 # We are only saving the LoRA weights
                 # TODO: Provide a function/script to merge the LoRA weights with pretrained weights
                 checkpoint = lora_state_dict(model)
-                fabric.save(os.path.join(out_dir, f"iter-{iter_num:06d}-ckpt.pth"), checkpoint)
-
+                fabric.save(os.path.join(out_dir, f"epoch-{epoch:.1f}-valloss{val_loss:.4f}.pth"), checkpoint)
+                fabric.save(os.path.join(out_dir, f"optimizer-epoch-{epoch:.1f}-valloss{val_loss:.4f}-ckpt.pth"), optimizer.state_dict())
         dt = time.time() - t0
         if iter_num % log_interval == 0:
-            fabric.print(f"iter {iter_num}: loss {loss.item():.4f}, time: {dt*1000:.2f}ms")
-
+            fabric.print(f"epoch {epoch:.1f} iter {iter_num}: loss {loss.item():.4f}, time: {dt*1000:.2f}ms, model name {out_dir}")
+            with open(os.path.join(out_dir, "train_log.txt"), "a") as file:
+                file.write(f"epoch {epoch:.1f} iter {iter_num}: train loss {loss.item():.6f} {datetime.now()}\n")
 
 def generate_response(model, instruction, tokenizer_path):
     tokenizer = Tokenizer(tokenizer_path)
@@ -171,6 +211,8 @@ def validate(fabric: L.Fabric, model: torch.nn.Module, val_data: np.ndarray, tok
     output = generate_response(model, instruction, tokenizer_path)
     fabric.print(instruction)
     fabric.print(output)
+    with open(os.path.join(out_dir, "val-sample.txt"), "a") as file:
+        file.write(f"instruction: {instruction} \n output: \n {output}\n")
 
     model.train()
     return out.item()
@@ -183,18 +225,39 @@ def loss_fn(logits, targets):
     return loss
     
 
+
 def get_batch(fabric: L.Fabric, data: list):
     ix = torch.randint(len(data), (micro_batch_size,))
 
-    input_ids = [data[i]["input_ids"].type(torch.int64) for i in ix]
-    labels = [data[i]["labels"].type(torch.int64) for i in ix]
+    if "philo" in data_dir.name or "orca" in data_dir.name or "metaMath" in data_dir.name:
+        input_ids = [data[i]["dialog_ids"].type(torch.int64) for i in ix]
+        labels = [data[i]["labels"].type(torch.int64) for i in ix]  
+    elif "hh" in data_dir.name:
+        input_ids_chosen = [data[i]["chosen"].type(torch.int64) for i in ix]
+        input_ids = input_ids_chosen 
+        labels = [i.clone() for i in input_ids]
+    elif "beaver" in data_dir.name:
+        if safer_or_better == 'safer':
+            using_index = "safer_response_id"
+        elif safer_or_better == "better":
+            using_index = "better_response_id"
+        input_ids = [ data[i][f"dialog_{data[i][using_index]}"].type(torch.int64) for i in ix]
+        labels = [i.clone() for i in input_ids]
+    else:
+        input_ids = [data[i]["input_ids"].type(torch.int64) for i in ix]
+        labels = [data[i]["labels"].type(torch.int64) for i in ix]
 
-    max_len = max(len(s) for s in input_ids)
+    max_len = min (max(len(s) for s in input_ids), max_seq_length)
 
     def pad_right(x, pad_id):
-        # pad right based on the longest sequence
-        n = max_len - len(x)
-        return torch.cat((x, torch.full((n,), pad_id, dtype=x.dtype)))
+        x = torch.tensor(x, dtype=x.dtype)
+        if len(x) > max_len:
+            #truncate based on max length
+            return x[:max_len]
+        else:
+            # pad right based on the longest sequence
+            n = max_len - len(x)
+            return torch.cat((x, torch.full((n,), pad_id, dtype=x.dtype)))
 
     x = torch.stack([pad_right(x, pad_id=0) for x in input_ids])
     y = torch.stack([pad_right(x, pad_id=-1) for x in labels])

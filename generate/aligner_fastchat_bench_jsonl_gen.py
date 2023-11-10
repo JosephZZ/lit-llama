@@ -17,20 +17,21 @@ sys.path.append(str(wd))
 
 from generate import generate
 from lit_llama import Tokenizer
-from lit_llama.aligner import LLaMA
 from lit_llama.utils import lazy_load, llama_model_lookup, quantization
-from scripts.prepare_alpaca import generate_multi_turn_prompt
+# from scripts.prepare_alpaca import generate_multi_turn_prompt
 
+from lit_llama.aligner import LLaMA
+# from lit_llama.alignerDeepReweight import LLaMA
 
 
 
 def main(
     prompt: str = "What food do lamas eat?",
     input: str = "",
-    aligner_path: Path = Path("out/aligner/lit-llama-2-baize/7B/5vector-start_layer2-lr9e-05bs32/epoch-5.0-iter-049999.pth"),
+    aligner_path: Path = Path("out/aligner/redo/lit-llama-2-alpaca512/7B/10vector-start_layer2-lr0.009bs64weightDecay0.02wu2/epoch-15.0-valloss0.8966"),
     pretrained_path: Path = Path("checkpoints/lit-llama-2/7B/lit-llama.pth"),
     tokenizer_path: Path = Path("checkpoints/lit-llama-2/tokenizer.model"),
-    aligner_length: int =5,
+    aligner_length: int =10,
     aligner_start_layer: int = 2,
     quantize: Optional[str] = None,
     max_new_tokens: int = 100,
@@ -39,6 +40,7 @@ def main(
     question_file: Path = Path("data/evaluation/Vicuna_questions.jsonl"),
     num_choices: int = 1,
     file_prefix : str = "",
+    instruction_style = "alpaca", 
     is_multi_turn: bool = False,
 ) -> None:
     """Generates a response based on a given instruction and an optional input.
@@ -63,7 +65,9 @@ def main(
     assert aligner_path.is_file()
     assert pretrained_path.is_file()
     assert tokenizer_path.is_file()
-    answer_file = file_prefix+ str(aligner_path)[:-3] + question_file.name[:-5] + "_answers" + ".jsonl"
+
+    filename = str(aligner_path).replace("/", "_")
+    answer_file = str(aligner_path)[:-3] + file_prefix + filename + instruction_style + question_file.name[:-5] + ".jsonl"
 
     precision = "bf16-true" if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else "32-true"
     fabric = L.Fabric(devices=1, precision=precision)
@@ -89,7 +93,7 @@ def main(
 
     if question_file is None:
         sample = {"instruction": prompt, "input": input}
-        prompt = generate_multi_turn_prompt(sample,[])
+        prompt = generate_multi_turn_prompt(sample,instruction_style, [])
         encoded = tokenizer.encode(prompt, bos=True, eos=False, device=model.device)
         prompt_length = encoded.size(0)
 
@@ -99,7 +103,7 @@ def main(
 
         model.reset_cache()
         output = tokenizer.decode(y)
-        output = output.split("### Response:")[1].strip()
+        output = output.split("### Response:")[1].split("### Instruction")[0].strip()
         print(output)
 
         tokens_generated = y.size(0) - prompt_length
@@ -122,7 +126,7 @@ def main(
                 history = []
                 for j in range(len(question["turns"])):
                     sample = {"instruction": question["turns"][j], "input": ""}
-                    prompt = generate_multi_turn_prompt(sample,history)
+                    prompt = generate_multi_turn_prompt(sample,instruction_style, history)
 
                     print("\n\n Turn {} with prompt length {}: \n\n {}".format(j,len(prompt), prompt))
                     encoded = tokenizer.encode(prompt, bos=True, eos=False, device=model.device)
@@ -134,7 +138,7 @@ def main(
                         model.reset_cache()
                         output = tokenizer.decode(y)
                         # print('could decode ', output)
-                        last_response = output.split("### Response:")[j+1].strip()
+                        last_response = output.split("### Response:")[j+1].split("### Instruction")[0].strip()
                         print(last_response)
 
                     except RuntimeError as e:
@@ -195,6 +199,43 @@ def reorg_answer_file(answer_file):
         for qid in qids:
             fout.write(answers[qid])
 
+def generate_prompt(example, instruct_style):
+    """Generates a standardized message to prompt the model with an instruction, optional input and a
+    'response' field."""
+    if instruct_style == "alpaca":
+        if example["input"]:
+            return (
+                "Below is an instruction that describes a task, paired with an input that provides further context. "
+                "Write a response that appropriately completes the request.\n\n"
+                f"### Instruction:\n{example['instruction']}\n\n### Input:\n{example['input']}\n\n### Response:"
+            )
+        return (
+            "Below is an instruction that describes a task. "
+            "Write a response that appropriately completes the request.\n\n"
+            f"### Instruction:\n{example['instruction']}\n\n### Response:"
+        )
+    elif instruct_style == "alpacaLong":
+        if example["input"]:
+            return (
+                "Below is an instruction that describes a task, paired with an input that provides further context. "
+                "Write a response that appropriately completes the request.\n\n"
+                f"### Instruction:\n{example['instruction']}\n\n### Input:\n{example['input']}\n\n### Response:"
+            )
+        return (
+            "Below is an instruction that describes a task. "
+            "Write a high quality and expanded response that appropriately completes the request.\n\n"
+            f"### Instruction:\n{example['instruction']}\n\n### Response:"
+        )
+    elif instruct_style == "orca" or "baize":
+        return "[|User|] "+ example['instruction']+" [|AI Assistant|] "
+    elif instruct_style == "beaver":
+        return "[User] "+ example['instruction']+" [Assistant] "
+    else:
+        raise ValueError(f"Unknown instruction style: {instruct_style}")
+    
+def generate_multi_turn_prompt(example, instruction_style, history):
+    #not implemented yet
+    return generate_prompt(example, instruction_style)
 
 
 if __name__ == "__main__":

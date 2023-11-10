@@ -32,7 +32,7 @@ eval_interval = 1000
 save_interval = 1000
 eval_iters = 100
 log_interval = 100
-devices = 1
+devices = 4
 
 # Hyperparameters
 learning_rate = 3e-5
@@ -50,7 +50,7 @@ warmup_iters = 100
 
 def main(
     data_dir: str = "data/alpaca",
-    pretrained_path: str = "checkpoints/lit-llama/7B/lit-llama.pth",
+    pretrained_path: str = "checkpoints/lit-llama-2/7B/lit-llama.pth",
     out_dir: str = "out/full/alpaca",
 ):
 

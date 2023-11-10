@@ -1,7 +1,7 @@
-CUDA_VISIBLE_DEVICES=3 \
+CUDA_VISIBLE_DEVICES=0 \
 python generate/adapter_v2.py \
---adapter_path out/adapter/llama-alpaca/7B/llama_adapter_len10_layer30_release.pth \
---pretrained_path checkpoints/lit-llama/7B/lit-llama.pth \
+--adapter_path out/adapterV2/lit-llama-decapoda-alpaca512/7B/lr0.0003bs64wd0.02/epoch-2.0-iter-051839.pth \
+--pretrained_path checkpoints/lit-llama-decapoda/7B/lit-llama.pth \
 --max_new_tokens 150 \
 --temperature 0.7 \
 --prompt "Can you explain the basics of quantum computing? \

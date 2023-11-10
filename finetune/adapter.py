@@ -14,6 +14,7 @@ Note: If you run into a CUDA error "Expected is_sm80 to be true, but got false",
 import os
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 import shutil
 
@@ -31,26 +32,29 @@ from lit_llama.tokenizer import Tokenizer
 from scripts.prepare_alpaca import generate_prompt
 from lightning.fabric.strategies import DeepSpeedStrategy
 
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+
+#adapter has trainable parameters: 1229760
+#13B has 1947120 
 
 instruction_tuning = True
-eval_interval = 600
-save_interval = 1000
-eval_iters = 100
-log_interval = 1
 devices = 1
 
 # Hyperparameters
 learning_rate = 9e-3
-batch_size = 64 / devices
+batch_size = 64/ devices
 micro_batch_size = 4
 gradient_accumulation_iters = batch_size // micro_batch_size
 assert gradient_accumulation_iters > 0
-epoch_size = 50000  # train dataset size
-num_epochs = 5
+epoch_size = 52000  # train dataset size
+num_epochs = 15
 max_iters = num_epochs * (epoch_size // micro_batch_size) // devices
 weight_decay = 0.02
-max_seq_length = 256  # see scripts/prepare_alpaca.py
-warmup_iters = 2 * (epoch_size // micro_batch_size) // devices  # 2 epochs
+max_seq_length = 512  # see scripts/prepare_alpaca.py
+warmup_epoch = 2
+warmup_iters = warmup_epoch * (epoch_size // micro_batch_size) // devices  # 2 epochs
+start_iter = 0 * (epoch_size // micro_batch_size) // devices 
 
 ds_config = {
     "train_micro_batch_size_per_gpu": micro_batch_size,
@@ -58,18 +62,27 @@ ds_config = {
     "zero_optimization": {"stage": 2},
 }
 
+previous_adapter_path = ""
+previous_optimizer_path = ""
+data_dir = Path ("data/alpaca512")
+model_base = "lit-llama-2"
+model_version = "7B"
+pretrained_path = Path (f"checkpoints/{model_base}/{model_version}/lit-llama.pth")
+out_dir = Path (f"out/adapter/redo/{model_base}-{data_dir.name}/{model_version}/lr{learning_rate}bs{batch_size}wd{weight_decay}wu{warmup_epoch}/")
 
-def main(
-    data_dir: str = "data/alpaca", 
-    pretrained_path: str = "checkpoints/lit-llama-2/7B/lit-llama.pth",
-    out_dir: str = "out/adapter/llama2-alpaca",
-):
+eval_interval = 0.1 * epoch_size // batch_size
+save_interval = 1* epoch_size // batch_size
+eval_iters = 30 if "lima" in data_dir.name else 200
+log_interval = 10
+
+
+def main():
 
     fabric = L.Fabric(
         accelerator="cuda", 
         devices=devices, 
         strategy=(DeepSpeedStrategy(config=ds_config) if devices > 1 else "auto"), 
-        precision="32-true",
+        precision="bf16-true",
     )
     fabric.launch()
     fabric.seed_everything(1337 + fabric.global_rank)
@@ -79,7 +92,9 @@ def main(
 
     train_data, val_data = load_datasets(data_dir=data_dir)
 
-    config = LLaMAConfig(block_size=max_seq_length)
+    config = LLaMAConfig.from_name(model_version)
+    config.block_size = max_seq_length
+
 
     if not os.path.isfile(pretrained_path):
         raise FileNotFoundError(
@@ -92,6 +107,8 @@ def main(
         model = LLaMA(config)
         # strict=False because missing keys due to adapter weights not containted in state dict
         model.load_state_dict(checkpoint, strict=False)
+        if previous_adapter_path:
+            model.load_state_dict(torch.load(previous_adapter_path), strict=False)
 
     mark_only_adapter_as_trainable(model)
 
@@ -99,11 +116,16 @@ def main(
     print(f"Number of trainable parameters: {num_params}")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    if previous_optimizer_path:
+        optimizer.load_state_dict(torch.load(previous_optimizer_path))
+
+
+    
     model, optimizer = fabric.setup(model, optimizer)
     train(fabric, model, optimizer, train_data, val_data, out_dir)
 
     # Save the final checkpoint at the end of training
-    save_model_checkpoint(fabric, model, os.path.join(out_dir, "lit-llama-adapter-finetuned.pth"))
+    # save_model_checkpoint(fabric, model, os.path.join(out_dir, "lit-llama-adapter-finetuned.pth"))
 
 
 def train(
@@ -120,8 +142,8 @@ def train(
     """
     step_count = 0
 
-    for iter_num in range(max_iters):
-
+    for iter_num in range(start_iter, max_iters):
+        epoch = iter_num * micro_batch_size * devices / epoch_size
         if step_count <= warmup_iters:
             # linear warmup
             lr = learning_rate * step_count / warmup_iters
@@ -143,21 +165,32 @@ def train(
                 
             if step_count % eval_interval == 0:
                 val_loss = validate(fabric, model, val_data)
-                fabric.print(f"step {iter_num}: val loss {val_loss:.4f}")
+                fabric.print(f"epoch {epoch} - iter {iter_num}: val loss {val_loss:.4f}")
                 fabric.barrier()
+                with open(os.path.join(out_dir, "val-log.txt"), "a") as file:
+                    file.write(f"epoch {epoch} - iter {iter_num}: val loss {val_loss:.6f}\n")
 
             if step_count % save_interval == 0:
                 print(f"Saving adapter weights to {out_dir}")
                 # TODO: Provide a function/script to merge the adapter weights with pretrained weights
-                save_model_checkpoint(fabric, model, os.path.join(out_dir, f"iter-{iter_num:06d}.pth"))
+                aligner_path = os.path.join(out_dir, f"epoch-{epoch:.1f}-valloss{val_loss:.4f}.pth")
+                optimizer_path = os.path.join(out_dir, f"optimizer-epoch-{epoch:.1f}-valloss{val_loss:.4f}.pth")
+                save_model_checkpoint(fabric, model, optimizer, aligner_path, optimizer_path)
 
         dt = time.time() - t0
         if iter_num % log_interval == 0:
-            fabric.print(f"iter {iter_num}: loss {loss.item():.4f}, time: {dt*1000:.2f}ms")
+            fabric.print(f"epoch {epoch} iter {iter_num}: loss {loss.item():.4f}, time: {dt*1000:.2f}ms, model name {out_dir}")
+            
+            with open(os.path.join(out_dir, "train log.txt"), "a") as file:
+                file.write(f"epoch {epoch} - iter {iter_num}: train loss {loss.item():.6f} {datetime.now()}\n")
+
+    aligner_path = os.path.join(out_dir, f"epoch-{epoch:.1f}-valloss{val_loss:.4f}.pth")
+    optimizer_path = os.path.join(out_dir, f"optimizer-epoch-{epoch:.1f}-valloss{val_loss:.4f}.pth")
+    save_model_checkpoint(fabric, model, optimizer, aligner_path, optimizer_path)
 
 
 def generate_response(model, instruction, input=""):
-    tokenizer = Tokenizer("checkpoints/lit-llama/tokenizer.model")
+    tokenizer = Tokenizer("checkpoints/lit-llama-2/tokenizer.model")
     sample = {"instruction": instruction, "input": input}
     prompt = instruction
     if instruction_tuning:
@@ -192,6 +225,8 @@ def validate(fabric: L.Fabric, model: torch.nn.Module, val_data: np.ndarray) -> 
     output = generate_response(model, instruction)
     fabric.print(instruction)
     fabric.print(output)
+    with open(os.path.join(out_dir, "val-sample.txt"), "a") as file:
+        file.write(f"instruction: {instruction} \n output: \n {output}\n")
 
     model.train()
     return val_loss.item()
@@ -204,38 +239,19 @@ def loss_fn(logits, targets):
     return loss
     
 
-def get_batch(fabric: L.Fabric, data: list):
-    ix = torch.randint(len(data), (micro_batch_size,))
-
-    input_ids = [data[i]["input_ids"].type(torch.int64) for i in ix]
-    labels = [data[i]["labels"].type(torch.int64) for i in ix]
-
-    max_len = max(len(s) for s in input_ids)
-
-    def pad_right(x, pad_id):
-        # pad right based on the longest sequence
-        n = max_len - len(x)
-        return torch.cat((x, torch.full((n,), pad_id, dtype=x.dtype)))
-
-    x = torch.stack([pad_right(x, pad_id=0) for x in input_ids])
-    y = torch.stack([pad_right(x, pad_id=-1) for x in labels])
-    x, y = fabric.to_device((x.pin_memory(), y.pin_memory()))
-    return x, y
-
-
 def load_datasets(data_dir):
     train_data = torch.load(os.path.join(data_dir, "train.pt"))
     val_data = torch.load(os.path.join(data_dir, "test.pt"))
     return train_data, val_data
 
 
-def save_model_checkpoint(fabric, model, file_path):
-    file_path = Path(file_path)
+def save_model_checkpoint(fabric, model, optimizer, aligner_path, optimizer_path):
+    aligner_path = Path(aligner_path)
 
     if isinstance(fabric.strategy, DeepSpeedStrategy):
         from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 
-        tmp_path = file_path.with_suffix(".tmp")
+        tmp_path = aligner_path.with_suffix(".tmp")
         fabric.save(tmp_path, {"model": model})
         fabric.barrier()
         if fabric.global_rank == 0:
@@ -243,13 +259,54 @@ def save_model_checkpoint(fabric, model, file_path):
             # and only keep the adapter weights
             state_dict = get_fp32_state_dict_from_zero_checkpoint(tmp_path)
             state_dict = adapter_state_from_state_dict(state_dict)
-            torch.save(state_dict, file_path)
+            torch.save(state_dict, aligner_path)
+            torch.save(optimizer.state_dict(), optimizer_path)
             shutil.rmtree(tmp_path)
     else:
         state_dict = adapter_state_from_state_dict(model.state_dict())
         if fabric.global_rank == 0:
-            torch.save(state_dict, file_path)
+            torch.save(state_dict, aligner_path)
+            torch.save(optimizer.state_dict(), optimizer_path)
         fabric.barrier()
+
+
+def get_batch(fabric: L.Fabric, data: list):
+    ix = torch.randint(len(data), (micro_batch_size,))
+
+    if "philo" in data_dir.name or "orca" in data_dir.name:
+        input_ids = [data[i]["dialog_ids"].type(torch.int64) for i in ix]
+        labels = [data[i]["labels"].type(torch.int64) for i in ix]  
+    elif "hh" in data_dir.name:
+        input_ids_chosen = [data[i]["chosen"].type(torch.int64) for i in ix]
+        input_ids = input_ids_chosen 
+        labels = [i.clone() for i in input_ids]
+    elif "beaver" in data_dir.name:
+        if safer_or_better == 'safer':
+            using_index = "safer_response_id"
+        elif safer_or_better == "better":
+            using_index = "better_response_id"
+        input_ids = [ data[i][f"dialog_{data[i][using_index]}"].type(torch.int64) for i in ix]
+        labels = [i.clone() for i in input_ids]
+    else:
+        input_ids = [data[i]["input_ids"].type(torch.int64) for i in ix]
+        labels = [data[i]["labels"].type(torch.int64) for i in ix]
+
+    max_len = min(max(len(s) for s in input_ids), max_seq_length)
+    # print ("max seq len: ", max_len)
+    def pad_right(x, pad_id):
+        if len(x) > max_len:
+            #truncate based on max length
+            return torch.tensor(x[:max_len])
+        else:
+            # pad right based on the longest sequence
+            n = max_len - len(x)
+            return torch.cat((x, torch.full((n,), pad_id, dtype=x.dtype)))
+        
+    x = torch.stack([pad_right(x, pad_id=0) for x in input_ids])
+    y = torch.stack([pad_right(x, pad_id=-1) for x in labels])
+    x, y = fabric.to_device((x.pin_memory(), y.pin_memory()))
+    return x, y
+
 
 
 if __name__ == "__main__":

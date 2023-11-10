@@ -26,32 +26,61 @@ wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
 from generate import generate
-from lit_llama.promptAligner import LLaMA, LLaMAConfig, mark_only_adapter_as_trainable, adapter_state_from_state_dict
 from lit_llama.tokenizer import Tokenizer
 from scripts.prepare_alpaca import generate_prompt
 from lightning.fabric.strategies import DeepSpeedStrategy
 
+promptAligner_version = "V2"
+if promptAligner_version == "V2":
+    from lit_llama.promptAlignerV2 import LLaMA, LLaMAConfig, mark_only_adapter_as_trainable, adapter_state_from_state_dict
+else:
+    from lit_llama.promptAligner import LLaMA, LLaMAConfig, mark_only_adapter_as_trainable, adapter_state_from_state_dict
 
-instruction_tuning = True
-eval_interval = 6000
-save_interval = 3000
-eval_iters = 200
-log_interval = 10
-devices = 2
+gpu_id = "2,3"
+os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
 
 # Hyperparameters
-learning_rate = 9e-4
+epoch_size = 300000  # train dataset size ; alpaca is 50000, isotonic is 280000, baize is 200000
+num_epochs = 10
+devices = 1
 batch_size = 32 / devices
 micro_batch_size = 1
+
+max_seq_length = 1024 #philo 384, orca 1024 #alpaca 256, dolly 1024, lima 2048, isotonic 1536 # see scripts/prepare_alpaca.py
+warmup_iters = (0.1*epoch_size // micro_batch_size) // devices  # 2 alpaca epochs
+
+learning_rate = 2e-5
+
+start_iter = 0
+
+train_embedding_base_only_epoch_threshold = 1
+train_embedding_resid_only_epoch_threshold = train_embedding_base_only_epoch_threshold + 1
+
+# data and model
+model_base = "lit-llama-2"
+model_version = '7b-chat'
+
+project_home_dir = Path("/home/shuwen/ziheng/llm/lit-llama")
+data_dir = project_home_dir / "data/orca" #philosopherQA_mydata
+
+previous_aligner_path = "out/promptAlignerV2/lit-llama-2-orca/7b-chat/1vector-start_layer2-lr2e-05bs32/epoch-0.5.pth"
+previous_optimizer_path = "out/promptAlignerV2/lit-llama-2-orca/7b-chat/1vector-start_layer2-lr2e-05bs32/optimizer-epoch-0.5.pth"
+
+custom_outdir_suffix = "" #"_noResMLPaddBias" # in v1, mark if the using_residue in the model.forward() is set to False
+
+
+# auto and constant params
+instruction_tuning = True
+eval_interval = 6000
+save_interval = 0.5 * epoch_size // (batch_size*devices)  # x epochs
+eval_iters = 200
+log_interval = 10
 gradient_accumulation_iters = batch_size // micro_batch_size
 assert gradient_accumulation_iters > 0
-epoch_size = 300000  # train dataset size ; alpaca is 50000, isotonic is 280000, baize is 200000
-num_epochs = 5
 max_iters = num_epochs * (epoch_size // micro_batch_size) // devices
 weight_decay = 0.02
-max_seq_length = 1024 #orca 1024 #alpaca 256, dolly 1024, lima 2048, isotonic 1536 # see scripts/prepare_alpaca.py
-warmup_iters = 1 * (3000 // micro_batch_size) // devices  # 2 alpaca epochs
-start_iter = int(epoch_size * 2.2)
+
 
 ds_config = {
     "train_micro_batch_size_per_gpu": micro_batch_size,
@@ -65,18 +94,15 @@ aligner_start_layer = 2
 aligner_generator_length = 10
 aligner_generator_start_layer = 2
 
-path_prefix = Path("/home/shuwen/ziheng/llm/lit-llama")
-data_dir = path_prefix / "data/orca"
-model_base = "lit-llama-2"
-pretrained_path = path_prefix / f"checkpoints/{model_base}/{model_size}/lit-llama.pth"
-previous_aligner_path = "out/promptAligner/lit-llama-2-orca/7B/1vector-start_layer2-lr9e-05bs16/epoch-2.2.pth"
-previous_optimizer_path = ""
-out_dir = path_prefix / f"out/promptAligner/{model_base}-{data_dir.name}/{model_size}/{aligner_length}vector-start_layer{aligner_start_layer}-lr{learning_rate}bs{int(batch_size)}/"
-save_model_name = f"{model_base}-{model_size}-{aligner_length}vector-start_layer{aligner_start_layer}-lr{learning_rate}bs{int(batch_size)}.pth"
+pretrained_path = project_home_dir / f"checkpoints/{model_base}/{model_version}/lit-llama.pth"
 
-print(f"Training LLaMA-Aligner with base model {model_base} using {model_size} parameters on the {data_dir.name} dataset, saving to {out_dir}")
+out_dir = project_home_dir / f"out/promptAligner{promptAligner_version}/{model_base}-{data_dir.name}{custom_outdir_suffix}/{model_version}/{aligner_length}vector-start_layer{aligner_start_layer}-lr{learning_rate}bs{int(batch_size)}/"
+save_model_name = f"{model_base}-{model_version}-{aligner_length}vector-start_layer{aligner_start_layer}-lr{learning_rate}bs{int(batch_size)}.pth"
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
+
+
+print(f"Training LLaMA-Aligner with base model {model_base} using {model_version} parameters on the {data_dir.name} dataset, saving to {out_dir}")
+
 def main():
 
     fabric = L.Fabric(
@@ -115,7 +141,7 @@ def main():
         if previous_aligner_path:
             model.load_state_dict(torch.load(previous_aligner_path), strict=False)
 
-    print("aligner length: ",model.config.adapter_prompt_length)
+    print("aligner length: ",model.config.aligner_length)
 
     mark_only_adapter_as_trainable(model)
 
@@ -158,11 +184,16 @@ def train(
         system_align_prompt_ids, dialog_ids, targets = get_batch(fabric, train_data)
         with fabric.no_backward_sync(model, enabled=((iter_num + 1) % gradient_accumulation_iters != 0)):
             model.set_model_mode(is_aligner=False)
-            aligner_embedding = model(system_align_prompt_ids).to(torch.bfloat16) #suppose we use bf16, otherwise change it
-            model.set_model_mode(is_aligner=True, aligner_embedding=aligner_embedding)
+            aligner_embedding, embd_bias = model(system_align_prompt_ids) #suppose we use bf16, otherwise change it
+            
+            model.set_model_mode(is_aligner=True, aligner_embedding=aligner_embedding.to(torch.bfloat16))
             logits = model(dialog_ids)
+            
             loss = loss_fn(logits, targets)
             fabric.backward(loss / gradient_accumulation_iters)
+
+            with open(os.path.join(out_dir, "log.txt"), "a") as file:
+                file.write(f"iter {iter_num}: loss {loss:.6f}\n")
 
         if (iter_num + 1) % gradient_accumulation_iters == 0:
             optimizer.step()
@@ -185,8 +216,10 @@ def train(
 
         dt = time.time() - t0
         if iter_num % log_interval == 0:
+            fabric.print(f"using gpu ",gpu_id)
             fabric.print(f"iter {iter_num}: loss {loss.item():.4f}, time: {dt*1000:.2f}ms, model_name:{out_dir}")
-    
+            fabric.print(f"aligner_embedding:", aligner_embedding)
+            fabric.print(f"embedding base/bias:", embd_bias)
         # Save the final checkpoint at the end of training
     aligner_path = os.path.join(out_dir, f"epoch-{epoch:.1f}-iter-{iter_num:06d}.pth")
     optimizer_path = os.path.join(out_dir, f"optimizer-epoch-{epoch:.1f}-iter-{iter_num:06d}.pth")
@@ -220,8 +253,8 @@ def validate(fabric: L.Fabric, model: torch.nn.Module, val_data: np.ndarray) -> 
     for k in range(eval_iters):
         system_align_prompt_ids, dialog_ids, targets = get_batch(fabric, val_data)
         model.set_model_mode(is_aligner=False)
-        aligner_embedding = model(system_align_prompt_ids).to(torch.bfloat16) #suppose we use bf16, otherwise change it
-        model.set_model_mode(is_aligner=True, aligner_embedding=aligner_embedding)
+        aligner_embedding, _ = model(system_align_prompt_ids) #suppose we use bf16, otherwise change it
+        model.set_model_mode(is_aligner=True, aligner_embedding=aligner_embedding.to(torch.bfloat16))
         logits = model(dialog_ids)        
         loss = loss_fn(logits, targets)
         losses[k] = loss.item()
@@ -256,7 +289,7 @@ def get_batch(fabric: L.Fabric, data: list, max_seq_len: int = max_seq_length):
 
     max_len_system_align_prompt = max(len(s) for s in system_align_prompt_ids)
     max_len_dialog = min(max(len(s) for s in dialog_ids), max_seq_len)
-
+    # print("max_len_dialog", max_len_dialog)
     def pad_right(x, pad_id, max_len):
         x = torch.tensor(x, dtype=x.dtype)
         if len(x) > max_len:

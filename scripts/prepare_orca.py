@@ -69,12 +69,12 @@ def prepare(
 
 
     print("System Prompt Lengths")
-    print("25th percentile: ", np.percentile(item_length, 25))
-    print("50th percentile: ", np.percentile(item_length, 50))
-    print("75th percentile: ", np.percentile(item_length, 75))
-    print("85th percentile: ", np.percentile(item_length, 85))
-    print("95th percentile: ", np.percentile(item_length, 95))
-    print("99th percentile: ", np.percentile(item_length, 99))
+    print("25th percentile: ", np.percentile(sys_prompt_length, 25))
+    print("50th percentile: ", np.percentile(sys_prompt_length, 50))
+    print("75th percentile: ", np.percentile(sys_prompt_length, 75))
+    print("85th percentile: ", np.percentile(sys_prompt_length, 85))
+    print("95th percentile: ", np.percentile(sys_prompt_length, 95))
+    print("99th percentile: ", np.percentile(sys_prompt_length, 99))
     print("max one: ", max(sys_prompt_length))
 
 
@@ -88,6 +88,10 @@ def prepare(
         generator=torch.Generator().manual_seed(seed),
     )
     train_set, test_set = list(train_set), list(test_set)
+
+    with open(data_folder / "test.json", "w") as file:
+        print("Saving test json split ...")
+        json.dump(test_set, file, indent=2)
 
     print(f"train has {len(train_set):,} samples")
     print(f"val has {len(test_set):,} samples")

@@ -37,24 +37,21 @@ from lit_llama.tokenizer import Tokenizer
 from scripts.prepare_alpaca import generate_prompt
 from lightning.fabric.strategies import DeepSpeedStrategy
 
+# num of param: 4279744
 
-eval_interval = 600
-save_interval = 1000
-eval_iters = 100
-log_interval = 1
 devices = 1
 
 # Hyperparameters
-learning_rate = 9e-5
+learning_rate = 1e-3
 batch_size = 64 / devices
-micro_batch_size = 8
+micro_batch_size = 2
 gradient_accumulation_iters = batch_size // micro_batch_size
 assert gradient_accumulation_iters > 0
-epoch_size = 50000  # train dataset size
+epoch_size = 52000  # train dataset size
 num_epochs = 5
 max_iters = num_epochs * (epoch_size // micro_batch_size) // devices
 weight_decay = 0.02
-max_seq_length = 256  # see scripts/prepare_alpaca.py
+max_seq_length = 512  # see scripts/prepare_alpaca.py
 warmup_iters = 2 * (epoch_size // micro_batch_size) // devices  # 2 epoch
 
 ds_config = {
@@ -63,12 +60,20 @@ ds_config = {
     "zero_optimization": {"stage": 2},
 }
 
+eval_interval = 0.1 * epoch_size // batch_size
+save_interval = 0.5 * epoch_size // batch_size
+eval_iters = 100
+log_interval = 1
 
-def main(
-    data_dir: str = "data/alpaca", 
-    pretrained_path: str = "checkpoints/lit-llama-2/7B/lit-llama.pth",
-    out_dir: str = "out/adapter_v2/llama2-alpaca",
-):
+model_base = "lit-llama-decapoda"
+data_dir = Path("data/alpaca512")
+pretrained_path: str = "checkpoints/lit-llama-decapoda/7B/lit-llama.pth"
+out_dir = Path(f"out/adapterV2/{model_base}-{data_dir.name}/7B/lr{learning_rate}bs{int(batch_size)}wd{weight_decay}/")
+
+previous_checkpoint = None
+previous_optimizer = None
+
+def main():
 
     fabric = L.Fabric(
         accelerator="cuda",
@@ -127,6 +132,7 @@ def train(
     step_count = 0
 
     for iter_num in range(max_iters):
+        epoch = iter_num * micro_batch_size / epoch_size
 
         if step_count <= warmup_iters:
             # linear warmup
@@ -151,19 +157,24 @@ def train(
                 val_loss = validate(fabric, model, val_data)
                 fabric.print(f"step {iter_num}: val loss {val_loss:.4f}")
                 fabric.barrier()
+                with open(os.path.join(out_dir, "val log.txt"), "a") as file:
+                    file.write(f"epoch {epoch:.1f} iter {iter_num}: val loss {val_loss:.6f}\n")
 
             if step_count % save_interval == 0:
                 print(f"Saving adapter weights to {out_dir}")
                 # TODO: Provide a function/script to merge the adapter weights with pretrained weights
-                save_model_checkpoint(fabric, model, os.path.join(out_dir, f"iter-{iter_num:06d}.pth"))
+                adapter_path = os.path.join(out_dir, f"epoch-{epoch:.1f}-iter-{iter_num:06d}.pth")
+                optimizer_path = os.path.join(out_dir, f"optimizer-epoch-{epoch:.1f}-iter-{iter_num:06d}.pth")
+                save_model_checkpoint(fabric, model, optimizer, adapter_path, optimizer_path)
 
         dt = time.time() - t0
         if iter_num % log_interval == 0:
-            fabric.print(f"iter {iter_num}: loss {loss.item():.4f}, time: {dt*1000:.2f}ms")
-
+            fabric.print(f"iter {iter_num}: loss {loss.item():.4f}, time: {dt*1000:.2f}ms training adapter_v2 on data {data_dir.name} bs{batch_size} lr{learning_rate} wd{weight_decay}")
+            with open(os.path.join(out_dir, "train_log.txt"), "a") as file:
+                file.write(f"epoch {epoch:.1f} iter {iter_num}: train loss {loss.item():.6f} \n")
 
 def generate_response(model, instruction, input=""):
-    tokenizer = Tokenizer("checkpoints/lit-llama/tokenizer.model")
+    tokenizer = Tokenizer("checkpoints/lit-llama-2/tokenizer.model")
     sample = {"instruction": instruction, "input": input}
     prompt = generate_prompt(sample)
     encoded = tokenizer.encode(prompt, bos=True, eos=False, device=model.device)
@@ -233,13 +244,13 @@ def load_datasets(data_dir):
     return train_data, val_data
 
 
-def save_model_checkpoint(fabric, model, file_path):
-    file_path = Path(file_path)
+def save_model_checkpoint(fabric, model, optimizer, adapter_path, optimizer_path):
+    adapter_path = Path(adapter_path)
 
     if isinstance(fabric.strategy, DeepSpeedStrategy):
         from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 
-        tmp_path = file_path.with_suffix(".tmp")
+        tmp_path = adapter_path.with_suffix(".tmp")
         fabric.save(tmp_path, {"model": model})
         fabric.barrier()
         if fabric.global_rank == 0:
@@ -247,13 +258,16 @@ def save_model_checkpoint(fabric, model, file_path):
             # and only keep the adapter weights
             state_dict = get_fp32_state_dict_from_zero_checkpoint(tmp_path)
             state_dict = adapter_v2_state_from_state_dict(state_dict)
-            torch.save(state_dict, file_path)
+            torch.save(state_dict, adapter_path)
+            torch.save(optimizer.state_dict(), optimizer_path)
             shutil.rmtree(tmp_path)
     else:
         state_dict = adapter_v2_state_from_state_dict(model.state_dict())
         if fabric.global_rank == 0:
-            torch.save(state_dict, file_path)
+            torch.save(state_dict, adapter_path)
+            torch.save(optimizer.state_dict(), optimizer_path)
         fabric.barrier()
+
 
 
 if __name__ == "__main__":

@@ -23,24 +23,25 @@ from lit_llama.lora import lora
 from lit_llama.utils import lazy_load, llama_model_lookup
 from scripts.prepare_alpaca import generate_prompt, generate_multi_turn_prompt
 
-lora_r = 8
-lora_alpha = 16
-lora_dropout = 0.05
+
 
 
 def main(
     prompt: str = "What food do lamas eat?",
     input: str = "",
-    lora_path: Path = Path("out/lora/llama2-alpaca/iter-005199-ckpt.pth"),
-    pretrained_path: Path = Path("checkpoints/lit-llama-2/7B/lit-llama.pth"),
+    lora_path: Path = Path("out/lora/lit-llama-2-alpaca512/13B/lora_r8_alpha16_dropout0.05_lr0.0003_bs64_epoch8/iter-080543-ckpt.pth"),
+    pretrained_path: Path = Path("checkpoints/lit-llama-2/13B/lit-llama.pth"),
     tokenizer_path: Path = Path("checkpoints/lit-llama-2/tokenizer.model"),
-    question_file: Path = Path("/home/ziheng/ssd-drive1/projects/llm/lit-llama/data/evaluation/Vicuna_questions.jsonl"),
+    question_file: Path = Path("/home/shuwen/ziheng/llm/lit-llama/data/evaluation/Vicuna_questions.jsonl"),
     quantize: Optional[str] = None,
     max_new_tokens: int = 100,
     top_k: int = 200,
     temperature: float = 0.7,
     num_choices: int = 1,
     file_suffix : str = "",
+    lora_r = 8,
+    lora_alpha = 16,
+    lora_dropout = 0.05,
 ) -> None:
     """Generates a response based on a given instruction and an optional input.
     This script will only work with checkpoints from the instruction-tuned LoRA model.
@@ -106,7 +107,7 @@ def main(
 
         model.reset_cache()
         output = tokenizer.decode(y)
-        output = output.split("### Response:")[1].strip()
+        output = output.split("### Response:")[1].split("### Instruction")[0].strip()
         print(output)
 
         tokens_generated = y.size(0) - prompt_length

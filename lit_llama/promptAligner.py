@@ -293,6 +293,8 @@ class LLaMA(llama.LLaMA):
         self.aligner_embedding = aligner_embedding
         self.aligner_generator_head_MLP = MLP(config)
         self.rms_generator = RMSNorm(config.n_embd)
+        self.aligner_embedding_bias1 = nn.Parameter(torch.zeros(config.n_embd))
+        self.aligner_embedding_bias2 = nn.Parameter(torch.zeros(config.n_embd))
 
     def set_model_mode(self, is_aligner:bool, aligner_embedding:torch.Tensor=None):
         if is_aligner:
@@ -387,9 +389,14 @@ class LLaMA(llama.LLaMA):
             results = logits
         else:
             #if aligner not given (at generator mode), we use the last layer output as aligner embedding
-            generated_align_embedding = x[:,-1,:] #take the last output to be our aligner embedding, assuming batch size 1
-            generated_align_embedding = generated_align_embedding + self.aligner_generator_head_MLP(self.rms_generator(generated_align_embedding))#further process the aligner embedding with MLP
-            results = generated_align_embedding
+            generated_align_embedding = x[-1,-1,:] #take the last output to be our aligner embedding, assuming batch size 1
+            generated_align_embedding += self.aligner_embedding_bias1
+            using_residual = False
+            if using_residual:
+                generated_align_embedding = generated_align_embedding + self.aligner_generator_head_MLP(self.rms_generator(generated_align_embedding))#further process the aligner embedding with MLP
+            else:
+                generated_align_embedding = self.aligner_generator_head_MLP(self.rms_generator(generated_align_embedding))
+            results = generated_align_embedding + self.aligner_embedding_bias2
 
         return results
 
