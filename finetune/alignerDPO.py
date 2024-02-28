@@ -33,7 +33,7 @@ from lit_llama.tokenizer import Tokenizer
 from scripts.prepare_alpaca import generate_prompt
 from lightning.fabric.strategies import DeepSpeedStrategy
 
-
+os.environ['CUDA_VISIBLE_DEVICES'] = '2,3'
 
 devices = 1
 using_reference = True
@@ -43,12 +43,12 @@ learning_rate = 1e-4
 batch_size = 64 / devices
 micro_batch_size = 8
 num_chosen_rejected_pair = micro_batch_size // 2
-beta = 0.5
+beta = 0.1
 
 gradient_accumulation_iters = batch_size // micro_batch_size
 assert gradient_accumulation_iters > 0
 epoch_size = 160000  # train dataset size ; alpaca is 50000, isotonic is 280000, baize is 200000
-num_epochs = 10
+num_epochs = 3
 max_iters = num_epochs * (epoch_size // micro_batch_size) // devices
 weight_decay = 0.02
 max_seq_length = 1024 #alpaca 256, dolly 1024, lima 2048, isotonic 1536 # see scripts/prepare_alpaca.py
@@ -68,14 +68,14 @@ ds_config = {
 }
 
 model_size = '7B'
-aligner_length = 1
+aligner_length = 10
 aligner_start_layer = 2
 data_dir = Path("data/beaver_safe2")
 safer_or_better = "safer"
 model_base = "lit-llama-2"
-model_version = '7B'
+model_version = model_size
 pretrained_path = Path(f"checkpoints/{model_base}/{model_version}/lit-llama.pth")
-previous_aligner_path = ""
+previous_aligner_path = "out/aligner/lit-llama-2-beaver_safe2/7B/10vector-start_layer2-lr0.009bs64weightDecay0.02wu0.5/final.pth"
 aligner_base_version ="beaver_safe_alpacaStyle_SFT" #"hhSFT" # 
 previous_optimizer_path = ""
 out_dir = Path(f"out/DPO/aligner/{model_base}-{data_dir.name}/{model_version}/base_{aligner_base_version}-{aligner_length}vector-start_layer{aligner_start_layer}-beta{beta}lr{learning_rate}bs{int(batch_size)}/")
@@ -85,8 +85,8 @@ print(f"Training LLaMA-Aligner with base model {model_base} using {model_version
 
 # os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
-device_0 = "cuda:0"
-device_1 = "cuda:0"
+device_ref = "cuda:0"
+device_model = "cuda:0"
 
 def main():
 
@@ -114,17 +114,18 @@ def main():
             f"Can't find the pretrained weights at {pretrained_path}."
             " Please follow the instructions in the README to download them."
         )
-    checkpoint = torch.load(pretrained_path)
+    checkpoint = torch.load(pretrained_path, map_location='cpu')
 
     with fabric.init_module():
         model = LLaMA(config)
+        # model.to(device_ref)
         # strict=False because missing keys due to adapter weights not containted in state dict
         model.load_state_dict(checkpoint, strict=False)
         if previous_aligner_path:
             model.load_state_dict(torch.load(previous_aligner_path), strict=False)
     mark_only_adapter_as_trainable(model)
 
-    model.to(device_0)
+    model.to(device_model)
 
     print("aligner length: ",model.config.adapter_prompt_length)
 
@@ -138,7 +139,7 @@ def main():
             
             for _, param in reference_model.named_parameters():
                 param.requires_grad = False
-    reference_model.to(device_1)
+    reference_model.to(device_ref)
 
 
     num_params = sum([p.numel() for p in model.parameters() if p.requires_grad])
@@ -148,7 +149,7 @@ def main():
     if previous_optimizer_path:
         optimizer.load_state_dict(torch.load(previous_optimizer_path))
 
-    model, optimizer = fabric.setup(model, optimizer)
+    model, optimizer = fabric.setup(model, optimizer, move_to_device=False)
     train(fabric, model, optimizer, train_data, val_data, out_dir, reference_model=reference_model)
 
 
@@ -179,8 +180,10 @@ def train(
         t0 = time.time()
 
         input_ids, targets = get_batch(fabric, train_data)
-        input_ids_for_ref = input_ids.clone().to(device_1)
-        reference_logits = reference_model(input_ids_for_ref).to(device_0)
+        input_ids = input_ids.to(device_model)
+        targets = targets.to(device_model)
+        input_ids_for_ref = input_ids.clone().to(device_ref)
+        reference_logits = reference_model(input_ids_for_ref).to(device_model)
         with fabric.no_backward_sync(model, enabled=((iter_num + 1) % gradient_accumulation_iters != 0)):
             logits = model(input_ids)
             loss, other_metrics = loss_fn(logits, targets, reference_logits) 
@@ -246,9 +249,11 @@ def validate(fabric: L.Fabric, model: torch.nn.Module, reference_model: torch.nn
     losses = torch.zeros(eval_iters)
     for k in range(eval_iters):
         input_ids, targets = get_batch(fabric, val_data)
+        input_ids = input_ids.to(device_model)
+        targets = targets.to(device_model)
         logits = model(input_ids)
-        input_ids_for_ref = input_ids.clone().to(device_1)
-        reference_logits = reference_model(input_ids_for_ref).to(device_0)
+        input_ids_for_ref = input_ids.clone().to(device_ref)
+        reference_logits = reference_model(input_ids_for_ref).to(device_model)
         loss, other_metrics = loss_fn(logits, targets, reference_logits)
         losses[k] = loss.item()
     val_loss = losses.mean()

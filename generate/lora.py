@@ -32,18 +32,18 @@ def main(
           [NewPrompt] If there are 250 days per year on planet Orbius-5, and each year is divided into 5 seasons, and an astronaut from Earth stays on Orbius-5 for 3 seasons before returning to Earth, what is the total number of days the astronaut will spend on Orbius-5? \
           ",
     input: str = "",
-    lora_path: Path = Path("out/lora/lit-llama-2-metaMath/7B/lora_r128_alpha16_dropout0.05_lr0.0001_bs64_epoch10/epoch-7.5-valloss0.4835.pth"),
+    lora_path: Path = Path("out/DPO/aligner/lit-llama-2-beaver_safe2/7B/base_beaver_safe_alpacaStyle_SFT-1vector-start_layer2-beta0.5lr0.0001bs64/epoch-10.0-iter-199999.pth"),
     pretrained_path: Path = Path("checkpoints/lit-llama-2/7B/lit-llama.pth"),
     tokenizer_path: Path = Path("checkpoints/lit-llama-2/tokenizer.model"),
     question_file = None, 
     is_save_results_to_file = False,
     is_beaver_safety_eval = False,
     quantize: Optional[str] = None,
-    max_new_tokens: int = 300,
+    max_new_tokens: int = 100,
     top_k: int = 200,
-    instruct_style: str = "metaMath", # or "alpaca"
-    temperature: float = 0.2,
-    lora_r = 128,
+    instruct_style: str = "alpaca", # or "alpaca"
+    temperature: float = 0.7,
+    lora_r = 8,
     lora_alpha = 16,
     lora_dropout = 0.05,
 ) -> None:
@@ -121,9 +121,13 @@ def main(
         
         print(output)
 
-        # output = output.split("### Response:")[1].split("### Instruction")[0].strip()
-        # sample["response"] = output
-        # sample["model"] = str(lora_path)
+
+        if instruct_style == "alpaca":
+            output = output.split("### Response:")[1].split("### Instruction")[0].strip()
+        elif instruct_style == "beaver":
+            output = output.split("[Assistant]")[1].split("[User]")[0].strip()
+        sample["response"] = output
+        sample["model"] = str(lora_path)
 
         tokens_generated = y.size(0) - prompt_length
         print(f"\n\nTime for inference: {t:.02f} sec total, {tokens_generated / t:.02f} tokens/sec", file=sys.stderr)
@@ -132,7 +136,7 @@ def main(
 
     if is_save_results_to_file:
         #file path is where the aligner path folder is and the name is the question file name + "_results.json"
-        file_path = lora_path.parent / (question_file.stem + "_results.json")
+        file_path = lora_path.parent / (question_file.stem + "_" + lora_path.stem + "_results.json")
 
         with open(file_path, "w") as f:
             json.dump(samples, f, indent=4)

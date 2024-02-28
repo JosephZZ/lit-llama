@@ -28,7 +28,7 @@ from lit_llama.alignerOneHeadSharedGating import LLaMA
 def main(
     prompt: str = "What food do lamas eat?",
     input: str = "",
-    aligner_path: Path = Path("out/alignerOneHeadSharedGating/lit-llama-2-alpaca1k256/7B/1vector-start_layer2-lr0.009bs32-weightDecay0.02-wu10/epoch-40.7-iter-005083.pth"),
+    aligner_path: Path = Path("out/alignerOneHeadSharedGatingBugFixed/lit-llama-2-alpaca512/7B/1vector-start_layer2-lr0.009bs64-weightDecay0.02-wu1/epoch-5.0-iter-032479.pth"),
     pretrained_path: Path = Path("checkpoints/lit-llama-2/7B/lit-llama.pth"),
     tokenizer_path: Path = Path("checkpoints/lit-llama-2/tokenizer.model"),
     aligner_length: int =1,

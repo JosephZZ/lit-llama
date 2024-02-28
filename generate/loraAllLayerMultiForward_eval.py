@@ -21,7 +21,7 @@ from lit_llama.loraMultiForward import lora
 from lit_llama.utils import lazy_load, llama_model_lookup
 from lit_llama.enableLoraAllLayer import enable_lora
 import json
-
+import os
 
 def main(
     prompt: str = "In five years, Grant will be 2/3 the age of the hospital that he is hired into. If Grant is currently 25 years old, how old is the hospital now? \
@@ -42,6 +42,8 @@ def main(
     lora_alpha = 16,
     lora_dropout = 0.05,
     num_of_forwards = 2,
+    start = 0,
+    end: Optional[int] = None,
     save_file = 'single',
 ) -> None:
     """Generates a response based on a given instruction and an optional input.
@@ -115,7 +117,15 @@ def main(
 
     cnt = 0
     save_dict = []
-    for sample in tqdm(samples[:1000]):
+
+    save_file = str(lora_path) + "_test.json"
+    if os.path.exists(str(lora_path) + "_test.json"):
+        with open(f'{save_file}', 'r') as f:
+            save_dict = json.load(f)
+        print(len(save_dict))
+        start = len(save_dict)
+    print('start', start, 'end', end)
+    for sample in tqdm(samples[start:end]):
         prompt = generate_prompt(sample, instruct_style)
         encoded = tokenizer.encode(prompt, bos=True, eos=False, device=model.device)
         prompt_length = encoded.size(0)
@@ -128,19 +138,19 @@ def main(
         output = tokenizer.decode(y)
 
         save_dict.append({'question': sample, 'answer': answers[cnt], 'completion': ' '.join(output.split('[|AI Assistant|]')[1:])})
-        # print('----------true-----------')
-        # print(save_dict[-1]['answer'])
-        # print('----------predicted-----------')
-        # print(save_dict[-1]['completion'])
+        print('----------true-----------')
+        print(save_dict[-1]['answer'])
+        print('----------predicted-----------')
+        print(save_dict[-1]['completion'])
         cnt += 1
         # tokens_generated = y.size(0) - prompt_length
         # print(f"\n\nTime for inference: {t:.02f} sec total, {tokens_generated / t:.02f} tokens/sec", file=sys.stderr)
         # if fabric.device.type == "cuda":
         #     print(f"Memory used: {torch.cuda.max_memory_reserved() / 1e9:.02f} GB", file=sys.stderr)
 
-        save_file = str(lora_path) + "_test.json"
-        with open(f'{save_file}', 'w') as f:
-            json.dump(save_dict, f, indent=4)
+    save_file = str(lora_path) + "_test.json"
+    with open(f'{save_file}', 'w') as f:
+        json.dump(save_dict, f, indent=4)
 
 def process_results(doc, completion, answer):
     answer = answer.split('The answer is:')[1].strip()
@@ -167,7 +177,7 @@ def process_results(doc, completion, answer):
 def eval(file_path = ""):
     with open(file_path, 'r') as f:
         results = json.load(f)
-
+    print(len(results))
     total = []
     for result in results:
         res = process_results(result['question'], result['completion'], result['answer'])

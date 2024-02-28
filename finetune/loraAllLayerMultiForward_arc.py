@@ -36,7 +36,7 @@ devices = 1
 epoch_size = 395000
 learning_rate = 3e-4
 batch_size = 64
-micro_batch_size = 1
+micro_batch_size = 2
 gradient_accumulation_iters = batch_size // micro_batch_size
 assert gradient_accumulation_iters > 0
 epoch_num = 10
@@ -50,10 +50,10 @@ warmup_epoch = 0.05
 warmup_iters = int (warmup_epoch * (epoch_size // micro_batch_size) // devices)  # 2 alpaca epochs
 
 #***************#
-num_of_forwards = 3
+num_of_forwards = 1
 #***************#
 
-data_name = "metaMath"
+data_name = "arc"
 data_dir: str = Path(f"data/{data_name}")
 model_base = "lit-llama-2"
 model_version = "7B"

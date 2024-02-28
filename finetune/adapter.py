@@ -33,7 +33,7 @@ from scripts.prepare_alpaca import generate_prompt
 from lightning.fabric.strategies import DeepSpeedStrategy
 
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 #adapter has trainable parameters: 1229760
 #13B has 1947120 
@@ -44,15 +44,15 @@ devices = 1
 # Hyperparameters
 learning_rate = 9e-3
 batch_size = 64/ devices
-micro_batch_size = 4
+micro_batch_size = 8
 gradient_accumulation_iters = batch_size // micro_batch_size
 assert gradient_accumulation_iters > 0
-epoch_size = 52000  # train dataset size
-num_epochs = 15
+epoch_size = 395000  # train dataset size
+num_epochs = 3
 max_iters = num_epochs * (epoch_size // micro_batch_size) // devices
 weight_decay = 0.02
-max_seq_length = 512  # see scripts/prepare_alpaca.py
-warmup_epoch = 2
+max_seq_length = 1024  # see scripts/prepare_alpaca.py
+warmup_epoch = 0.3
 warmup_iters = warmup_epoch * (epoch_size // micro_batch_size) // devices  # 2 epochs
 start_iter = 0 * (epoch_size // micro_batch_size) // devices 
 
@@ -64,15 +64,15 @@ ds_config = {
 
 previous_adapter_path = ""
 previous_optimizer_path = ""
-data_dir = Path ("data/alpaca512")
+data_dir = Path ("data/metaMath")
 model_base = "lit-llama-2"
 model_version = "7B"
 pretrained_path = Path (f"checkpoints/{model_base}/{model_version}/lit-llama.pth")
-out_dir = Path (f"out/adapter/redo/{model_base}-{data_dir.name}/{model_version}/lr{learning_rate}bs{batch_size}wd{weight_decay}wu{warmup_epoch}/")
+out_dir = Path (f"out/adapter/{model_base}-{data_dir.name}/{model_version}/lr{learning_rate}bs{batch_size}wd{weight_decay}wu{warmup_epoch}/")
 
 eval_interval = 0.1 * epoch_size // batch_size
 save_interval = 1* epoch_size // batch_size
-eval_iters = 30 if "lima" in data_dir.name else 200
+eval_iters = 30 if "lima" in data_dir.name else 100
 log_interval = 10
 
 
@@ -273,7 +273,7 @@ def save_model_checkpoint(fabric, model, optimizer, aligner_path, optimizer_path
 def get_batch(fabric: L.Fabric, data: list):
     ix = torch.randint(len(data), (micro_batch_size,))
 
-    if "philo" in data_dir.name or "orca" in data_dir.name:
+    if "philo" in data_dir.name or "orca" in data_dir.name or "metaMath" in data_dir.name:
         input_ids = [data[i]["dialog_ids"].type(torch.int64) for i in ix]
         labels = [data[i]["labels"].type(torch.int64) for i in ix]  
     elif "hh" in data_dir.name:
@@ -290,6 +290,7 @@ def get_batch(fabric: L.Fabric, data: list):
     else:
         input_ids = [data[i]["input_ids"].type(torch.int64) for i in ix]
         labels = [data[i]["labels"].type(torch.int64) for i in ix]
+
 
     max_len = min(max(len(s) for s in input_ids), max_seq_length)
     # print ("max seq len: ", max_len)

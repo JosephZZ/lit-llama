@@ -54,6 +54,7 @@ from lit_llama.model import build_rope_cache, apply_rope, RMSNorm, MLP, KVCache,
 class LLaMAConfig(llama.LLaMAConfig):
     adapter_prompt_length: int = 10
     adapter_start_layer: int = 2
+    adapter_combine_number : int = 3
 
 
 class CausalSelfAttention(nn.Module):
@@ -166,8 +167,17 @@ class CausalSelfAttention(nn.Module):
             amask = torch.ones(q.shape[-2], ak.shape[-2], dtype=torch.bool, device=x.device) # (T, aT)
             # ↓ (B, nh, T, hs) @ (B, nh, aT, hs).mT --> (B, nh, T, aT) @ (B, nh, aT, hs) --> (B, nh, T, hs)
             # TODO: add a network that adapts the k and v of value_embedding based on the input q
-            ay = self.scaled_dot_product_attention_with_custom_gating(q, ak, av, self.gating_factor, attn_mask=amask, dropout_p=0.0, is_causal=False) # (B, nh, T, hs)
-            y = y +  ay
+            split = [10,20, 30]
+            last_pos = 0
+            for i, pos in enumerate(split):
+                this_v = av[:, :, last_pos:pos, :]
+                this_k = ak[:, :, last_pos:pos, :]
+                this_gating_factor = self.gating_factor[:, :, :, i:i+1]
+                # ay = self.scaled_dot_product_attention_with_custom_gating(q, this_k, this_v, this_gating_factor, attn_mask=amask, dropout_p=0.0, is_causal=False) # (B, nh, T, hs)
+                amask = torch.ones(q.shape[-2], this_k.shape[-2], dtype=torch.bool, device=x.device) # (T, aT)
+                ay = F.scaled_dot_product_attention(q, this_k, this_v, attn_mask=amask, dropout_p=0.0) # (B, nh, T, hs)
+                y = y +  1/len(split) * ay * this_gating_factor
+                last_pos = pos
 
         y = y.transpose(1, 2).contiguous().view(B, T, C)  # re-assemble all head outputs side by side
 

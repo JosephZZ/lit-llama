@@ -38,16 +38,16 @@ devices = 1
 
 # Hyperparameters
 epoch_size = 395000
-learning_rate = 1e-4
+learning_rate = 3e-4
 batch_size = 64
-micro_batch_size = 4
+micro_batch_size = 8
 gradient_accumulation_iters = batch_size // micro_batch_size
 assert gradient_accumulation_iters > 0
-epoch_num = 10
+epoch_num = 5
 max_iters = epoch_size * epoch_num // micro_batch_size
-weight_decay = 0.02
+weight_decay = 0
 max_seq_length = 1536  # see scripts/prepare_alpaca.py
-lora_r = 128
+lora_r = 8
 lora_alpha = 16
 lora_dropout = 0.05
 warmup_epoch = 0.1
@@ -72,8 +72,8 @@ start_iter = 0 * epoch_size // micro_batch_size
 safer_or_better = 'safer'
 
 eval_interval =  0.1*epoch_size // batch_size
-save_interval = 0.5*epoch_size // batch_size
-eval_iters =  30 if "lima" in data_name else 200
+save_interval = 1*epoch_size // batch_size
+eval_iters =  30 if "lima" in data_name else 100
 log_interval = 10
 
 

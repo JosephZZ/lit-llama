@@ -22,7 +22,7 @@ beaver_safety_eval_question_path = Path("data/evaluation/beaver_safety_eval_ques
 
 
 def main(
-    prompt: str = "What food do lamas eat?",
+    prompt: str = "A robe takes 2 bolts of blue fiber and half that much white fiber.  How many bolts in total does it take? Reason step by step and denote the final answer with \"###The answer is:\"",
     input: str = "",
     adapter_path: Path = Path("out/adapter/alpaca/lit-llama-adapter-finetuned.pth"),
     pretrained_path: Path = Path("checkpoints/lit-llama-2/7B/lit-llama.pth"),

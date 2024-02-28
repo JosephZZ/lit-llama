@@ -9,25 +9,35 @@ import torch
 import pickle
 from tqdm import tqdm
 import json
-from utils import is_equiv
+from utils import is_equiv, last_boxed_only_string
+
 # support running without installing as a package
 wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
 from generate import generate
-from lit_llama.modelMultiForward import LLaMA
 from lit_llama.tokenizer import Tokenizer
-from lit_llama.loraMultiForward import lora
-from lit_llama.utils import lazy_load, llama_model_lookup
-from lit_llama.enableLoraAllLayer import enable_lora
+
+
+from lit_llama.utils import lazy_load, llama_model_lookup, quantization
 import json
 import os
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 # checkpoint example (you can choose others)
 # single forward： out/loraAllLayerMultiForward_1/lit-llama-2-metaMath/7B/lora_r128_alpha16_dropout0.05_lr0.0003_bs64_epoch10warmup4937/epoch9.997-valloss0.1871.pth
 # double： out/loraAllLayerMultiForward_2/lit-llama-2-metaMath/7B/lora_r128_alpha16_dropout0.05_lr0.0003_bs64_epoch10warmup9875/epoch7.198-valloss0.1894.pth
+
+def remove_boxed(s):
+    left = "\\boxed{"
+    try:
+        assert s[:len(left)] == left
+        assert s[-1] == "}"
+        return s[len(left):-1]
+    except:
+        return None
+
 
 def main(
     prompt: str = "In five years, Grant will be 2/3 the age of the hospital that he is hired into. If Grant is currently 25 years old, how old is the hospital now? \
@@ -36,19 +46,21 @@ def main(
           [NewPrompt] If there are 250 days per year on planet Orbius-5, and each year is divided into 5 seasons, and an astronaut from Earth stays on Orbius-5 for 3 seasons before returning to Earth, what is the total number of days the astronaut will spend on Orbius-5? \
           ",
     input: str = "",
-    lora_path: Path = Path("out/loraAllLayerMultiForward_2/lit-llama-2-metaMath/7B/lora_r128_alpha16_dropout0.05_lr0.0003_bs64_epoch10warmup9875/epoch8.198-valloss0.1855.pth"),
+    adapter_path: Path = Path("out/loraAllLayerMultiForward_2/lit-llama-2-metaMath/7B/lora_r128_alpha16_dropout0.05_lr0.0003_bs64_epoch10warmup9875/epoch7.198-valloss0.1894.pth"),
     pretrained_path: Path = Path("checkpoints/lit-llama-2/7B/lit-llama.pth"),
     tokenizer_path: Path = Path("checkpoints/lit-llama-2/tokenizer.model"),
+    mode = "loraAllLayerMultiForward",
+    model_size = "7B",
+    eval_file = "GSM8K", # "GSM8K" or "MATH" or customized jsonl file
+    aligner_length = 1000,
     quantize: Optional[str] = None,
+    range_start: int = 0,
+    range_end: Optional[int] = None,
     max_new_tokens: int = 200,
     top_k: int = 200,
+    num_of_forwards: int=2,
     instruct_style: str = "metaMath", # or "alpaca"
     temperature: float = 0.4,
-    lora_r = 128,
-    lora_alpha = 16,
-    lora_dropout = 0.05,
-    num_of_forwards = 2,
-    save_file = 'single_gm8k',
 ) -> None:
     """Generates a response based on a given instruction and an optional input.
     This script will only work with checkpoints from the instruction-tuned LoRA model.
@@ -56,7 +68,7 @@ def main(
 
     Args:
         prompt: The prompt/instruction (Alpaca style).
-        lora_path: Path to the checkpoint with trained LoRA weights, which are the output of
+        adapter_path: Path to the checkpoint with trained LoRA weights, which are the output of
             `finetune_lora.py`.
         input: Optional input (Alpaca style).
         pretrained_path: The path to the checkpoint with pretrained LLaMA weights.
@@ -69,19 +81,33 @@ def main(
         temperature: A value controlling the randomness of the sampling process. Higher values result in more random
             samples.
     """
-    assert lora_path.is_file()
+    assert adapter_path.is_file()
     assert pretrained_path.is_file()
     assert tokenizer_path.is_file()
 
     prompts, answers = [], []
-    data_path = 'data/metaMath/GSM8K_test.jsonl'
+    if eval_file == "GSM8K":
+        data_path = 'data/metaMath/GSM8K_test.jsonl'
+    elif eval_file == "MATH":
+        data_path = "data/metaMath/MATH_test.jsonl"
+    else:
+        data_path = eval_file
     with open(data_path,"r+", encoding="utf8") as f:
         for idx, item in enumerate(jsonlines.Reader(f)):
-            temp_instr = instruction=item["query"]
-            prompts.append(temp_instr)
-            temp_ans = item['response'].split('#### ')[1]
-            temp_ans = int(temp_ans.replace(',', ''))
-            answers.append(temp_ans)
+            if "GSM8K" in data_path:
+                temp_instr = instruction=item["query"]
+                temp_ans = item['response'].split('#### ')[1]
+                temp_ans = int(temp_ans.replace(',', ''))
+                prompts.append(temp_instr)
+                answers.append(temp_ans)
+                eval_set = 'gm8k'
+            elif "MATH" in data_path:
+                temp_instr = item["instruction"]
+                prompts.append(temp_instr)
+                solution = item['output']
+                temp_ans = remove_boxed(last_boxed_only_string(solution))
+                answers.append(temp_ans)
+                eval_set = 'math'
 
     if quantize is not None:
         raise NotImplementedError("Quantization in LoRA is not supported yet")
@@ -92,22 +118,49 @@ def main(
     print("Loading model ...", file=sys.stderr)
     t0 = time.time()
 
-    with lazy_load(pretrained_path) as pretrained_checkpoint, lazy_load(lora_path) as lora_checkpoint:
-        name = llama_model_lookup(pretrained_checkpoint)
+    if mode == "aligner":
+        from lit_llama.aligner import LLaMA, LLaMAConfig
+        config = LLaMAConfig.from_name(model_size)
+        config.adapter_prompt_length = aligner_length
+        config.adapter_start_layer = 2
+
+        with fabric.init_module(empty_init=True), quantization(mode=quantize):
+            model = LLaMA(config)
+
+    elif mode == "adapter":
+        from lit_llama.adapter import LLaMA, LLaMAConfig
+
+        with fabric.init_module(empty_init=True), quantization(mode=quantize):
+            model = LLaMA.from_name(model_size)
+
+    elif mode == "lora":
+        from lit_llama import LLaMA
+        from lit_llama.lora import lora
+
+        lora_r = 8
+        lora_alpha = 16
+        lora_dropout = 0.05
+        with fabric.init_module(), lora(r=lora_r, alpha=lora_alpha, dropout=lora_dropout, enabled=True):
+            model = LLaMA.from_name(model_size)
+
+    elif mode == "loraAllLayerMultiForward":
+        from lit_llama.modelMultiForward import LLaMA
+        from lit_llama.loraMultiForward import lora
+        from lit_llama.enableLoraAllLayer import enable_lora
 
         with fabric.init_module(empty_init=True):
-            model = LLaMA.from_name(name)
-            model.config.lora_r = lora_r
-            model.config.lora_alpha = lora_alpha
-            model.config.lora_dropout = lora_dropout
+            model = LLaMA.from_name(model_size)
+            model.config.lora_r = 128
+            model.config.lora_alpha = 16
+            model.config.lora_dropout = 0.05
             model.config.num_of_forwards = num_of_forwards
-
             enable_lora(model, model.config)
 
-            # 1. Load the pretrained weights
-            model.load_state_dict(pretrained_checkpoint, strict=False)
-            # 2. Load the fine-tuned lora weights
-            model.load_state_dict(lora_checkpoint, strict=False)
+    with lazy_load(pretrained_path) as pretrained_checkpoint, lazy_load(adapter_path) as adapter_checkpoint:
+        # 1. Load the pretrained weights
+        model.load_state_dict(pretrained_checkpoint, strict=False)
+        # 2. Load the fine-tuned lora weights
+        model.load_state_dict(adapter_checkpoint, strict=False)
 
     print(f"Time to load model: {time.time() - t0:.02f} seconds.", file=sys.stderr)
 
@@ -121,8 +174,18 @@ def main(
     samples = [{"instruction": p.strip(), "input": ""} for p in prompts]
 
     cnt = 0
+    correct_cnt = 0
     save_dict = []
-    for sample in tqdm(samples[:1000]):
+
+    save_file = str(adapter_path) + f"_{eval_set}_eval_results.json"
+    if os.path.exists(save_file):
+        with open(f'{save_file}', 'r') as f:
+            save_dict = json.load(f)
+        range_start = len(save_dict)
+        print(range_start)
+
+    print(len(samples))
+    for sample in tqdm(samples[range_start:range_end]):
         prompt = generate_prompt(sample, instruct_style)
         encoded = tokenizer.encode(prompt, bos=True, eos=False, device=model.device)
         prompt_length = encoded.size(0)
@@ -133,23 +196,32 @@ def main(
 
         model.reset_cache()
         output = tokenizer.decode(y)
+        completion = ' '.join(output.split('[|AI Assistant|]')[1:])
 
-        save_dict.append({'question': sample, 'answer': answers[cnt], 'completion': ' '.join(output.split('[|AI Assistant|]')[1:])})
+        is_model_correct, extracted_ans = process_results(sample, completion, answers[cnt])
+        save_dict.append({'question': sample, 'answer': answers[cnt], 'completion': completion, 'extracted_ans': extracted_ans, 'is_model_correct': is_model_correct})
+        
+        cnt += 1
+        correct_cnt += is_model_correct
+
         print('----------question-------')
         print(sample)
+        print('----------output-----------')
+        print(completion)
         print('----------true-----------')
         print(save_dict[-1]['answer'])
         print('----------predicted-----------')
-        print(save_dict[-1]['completion'])
-        cnt += 1
+        print(extracted_ans)
+        print('----------total correct so far-----------')
+        print(correct_cnt, ' / ', cnt)
         # tokens_generated = y.size(0) - prompt_length
         # print(f"\n\nTime for inference: {t:.02f} sec total, {tokens_generated / t:.02f} tokens/sec", file=sys.stderr)
         # if fabric.device.type == "cuda":
         #     print(f"Memory used: {torch.cuda.max_memory_reserved() / 1e9:.02f} GB", file=sys.stderr)
     
-        save_file = str(lora_path) + "_gm8k_eval_results.json"
-        with open(f'{save_file}', 'w') as f:
-            json.dump(save_dict, f, indent=4)
+    save_file = str(adapter_path) + f"_{eval_set}_eval_results.json"
+    with open(f'{save_file}', 'w') as f:
+        json.dump(save_dict, f, indent=4)
 
 
 def process_results(doc, completion, answer):
@@ -157,29 +229,24 @@ def process_results(doc, completion, answer):
     answer = str(answer)
     if len(split_ans) > 1:
         ans = split_ans[1]
-        extract_ans_temp = ans.split('\n')[0]
-        extract_ans_temp = extract_ans_temp.strip()
-        if len(extract_ans_temp)>0 and extract_ans_temp[-1] == '.':
-            extract_ans = extract_ans_temp[0:-1]
-        else:
-            extract_ans = extract_ans_temp
-        extract_ans = extract_ans.strip()
+        extract_ans_temp = ans.split("#")[0].split('\n')[0]
+        extract_ans = extract_ans_temp.strip().strip('.').strip().strip('.').strip()
         if is_equiv(extract_ans, answer):
-            return True
+            return True, extract_ans
         else:
-            return False
+            return False, extract_ans
     else:
         temp = {'question': doc, 'output': completion, 'answer': answer}
         # invalid_outputs.append(temp)
-        return False
+        return False, None
 
-def eval(file_path=''):
+def eval(file_path='/home/shuwen/ziheng/llm/lit-llama/out/loraAllLayerMultiForward_1/lit-llama-2-metaMath/7B/lora_r128_alpha16_dropout0.05_lr0.0003_bs64_epoch10warmup4937/epoch9.997-valloss0.1871.pth_test.json'):
     with open(file_path, 'r') as f:
         results = json.load(f)
-
+    print(len(results))
     total = []
     for result in results:
-        res = process_results(result['question'], result['completion'], result['answer'])
+        res,_ = process_results(result['question'], result['completion'], result['answer'])
         total.append(res)
     
     print('final score:', sum(total)/len(total))
@@ -219,5 +286,5 @@ if __name__ == "__main__":
         "ignore", 
         message="ComplexHalf support is experimental and many operators don't support it yet"
     )
-    # CLI(main)
-    CLI(eval)
+    CLI(main)
+    # CLI(eval)

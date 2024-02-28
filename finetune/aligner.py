@@ -31,18 +31,18 @@ from lit_llama.tokenizer import Tokenizer
 from scripts.prepare_alpaca import generate_prompt
 from lightning.fabric.strategies import DeepSpeedStrategy
 
-
+#4096960 - 1000tokens
 
 devices = 1
 
 # Hyperparameters
 learning_rate = 9e-3
 batch_size = 64 // devices
-micro_batch_size = 1
+micro_batch_size = 2
 gradient_accumulation_iters = batch_size // micro_batch_size
 assert gradient_accumulation_iters > 0
-epoch_size = 160000  # train dataset size ; alpaca is 50000, isotonic is 280000, baize is 200000
-num_epochs = 2
+epoch_size = 395000  # train dataset size ; alpaca is 50000, isotonic is 280000, baize is 200000
+num_epochs = 3
 max_iters = int(num_epochs * (epoch_size // micro_batch_size) // devices)
 weight_decay = 0.02
 max_seq_length = 2048 #alpaca 256, dolly 1024, lima 2048, isotonic 1536 # see scripts/prepare_alpaca.py
@@ -63,10 +63,12 @@ ds_config = {
 }
 
 safer_or_better = 'safer'
+##****###
 model_size = '7B'
-aligner_length = 1
+aligner_length = 1000
+data_dir = Path("data/metaMath")
+##****###
 aligner_start_layer = 2
-data_dir = Path("data/beaver_safe2")
 model_base = "lit-llama-2"
 model_version = model_size
 pretrained_path = Path(f"checkpoints/{model_base}/{model_version}/lit-llama.pth")
@@ -115,7 +117,7 @@ def main():
 
     print("aligner length: ",model.config.adapter_prompt_length)
 
-    # mark_only_adapter_as_trainable(model)
+    mark_only_adapter_as_trainable(model)
 
     num_params = sum([p.numel() for p in model.parameters() if p.requires_grad])
     print(f"Number of trainable parameters: {num_params}")
@@ -243,13 +245,12 @@ def loss_fn(logits, targets):
 def get_batch(fabric: L.Fabric, data: list):
     ix = torch.randint(len(data), (micro_batch_size,))
 
-    if "philo" in data_dir.name or "orca" in data_dir.name:
+    if "philo" in data_dir.name or "orca" in data_dir.name or "metaMath" in data_dir.name:
         input_ids = [data[i]["dialog_ids"].type(torch.int64) for i in ix]
         labels = [data[i]["labels"].type(torch.int64) for i in ix]  
     elif "hh" in data_dir.name:
         input_ids_chosen = [data[i]["chosen"].type(torch.int64) for i in ix]
-        input_ids_rejected = [data[i]["rejected"].type(torch.int64) for i in ix]
-        input_ids = input_ids_chosen + input_ids_rejected
+        input_ids = input_ids_chosen 
         labels = [i.clone() for i in input_ids]
     elif "beaver" in data_dir.name:
         if safer_or_better == 'safer':
@@ -261,6 +262,7 @@ def get_batch(fabric: L.Fabric, data: list):
     else:
         input_ids = [data[i]["input_ids"].type(torch.int64) for i in ix]
         labels = [data[i]["labels"].type(torch.int64) for i in ix]
+
 
     max_len = max(len(s) for s in input_ids)
 

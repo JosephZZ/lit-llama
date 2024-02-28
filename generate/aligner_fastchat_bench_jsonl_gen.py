@@ -28,10 +28,10 @@ from lit_llama.aligner import LLaMA
 def main(
     prompt: str = "What food do lamas eat?",
     input: str = "",
-    aligner_path: Path = Path("out/aligner/redo/lit-llama-2-alpaca512/7B/10vector-start_layer2-lr0.009bs64weightDecay0.02wu2/epoch-15.0-valloss0.8966"),
+    aligner_path: Path = Path("out/aligner/lit-llama-2-alpaca512/7B/20vector-start_layer2-lr0.009bs64weightDecay0.02wu1/final.pth"),
     pretrained_path: Path = Path("checkpoints/lit-llama-2/7B/lit-llama.pth"),
     tokenizer_path: Path = Path("checkpoints/lit-llama-2/tokenizer.model"),
-    aligner_length: int =10,
+    aligner_length: int =20,
     aligner_start_layer: int = 2,
     quantize: Optional[str] = None,
     max_new_tokens: int = 100,

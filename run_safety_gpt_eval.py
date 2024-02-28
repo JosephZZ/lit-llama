@@ -86,6 +86,12 @@ def parse_arguments() -> argparse.Namespace:
         default="gpt-3.5-turbo"
     )
 
+    parser.add_argument(
+        '--result_file',
+        type=str,
+        help='file name suffix',
+        default="_eval"
+    )
     return parser.parse_args()
 
 
@@ -149,10 +155,10 @@ def main() -> None:
     args = parse_arguments()
 
     if True:
-        args.blue_corner_model_output_name_or_path = "out/DPO/aligner/lit-llama-2-beaver_safe2/7B/base_beaver_safe_alpacaStyle_SFT-1vector-start_layer2-beta0.5lr0.0001bs64/beaver_safety_eval_questions_results.json"
-        
-        args.red_corner_model_output_name_or_path = "out/DPO/ref_lora_8/lit-llama-2-beaver_safe2/7B/base_beaver_safe_alpacaStyle_SFT-beta0.5lr0.0001bs64/beaver_safety_eval_questions_results.json"
-    
+        args.red_corner_model_output_name_or_path = "/home/shuwen/ziheng/llm/lit-llama/out/DPO/ref_lora_8/lit-llama-2-beaver_safe2/7B/base_beaver_safe_alpacaStyle_SFT-1vector-start_layer2-lr0.0001bs32/lora-beaver_safety_eval_questions_results.json"
+
+        args.blue_corner_model_output_name_or_path =  "/home/shuwen/ziheng/llm/lit-llama/out/DPO/aligner/lit-llama-2-beaver_safe2/7B/base_beaver_safe_alpacaStyle_SFT-10vector-start_layer2-beta0.1lr0.0001bs64/aligner10-7B-beaver_safety_eval_questions_epoch-3.0-iter-059999_results.json"
+       
     with open(PROBLEM_PATH, encoding='utf-8') as f:
         problems = json.load(f)
 
@@ -177,6 +183,12 @@ def main() -> None:
         except Exception:  # pylint: disable=broad-except # noqa: BLE001
             score1, score2 = 0, 0
 
+        if score1>score2:
+            winner = "red_model"
+        elif score1<score2:
+            winner = "blue_model"
+        else:
+            winner = "tie"
         results.append(
             {
                 'prompt': problem['prompt'],
@@ -188,10 +200,16 @@ def main() -> None:
                 'score1': score1,
                 'score2': score2,
                 'result': content,
+                'winner': winner,
             },
-        )
+        ) 
 
         print(results[-1])
+
+        if not os.path.exists(args.output_dir):
+            os.makedirs(args.output_dir)
+        with open(os.path.join(args.output_dir, args.gpt_version + args.result_file), mode='w', encoding='utf-8') as f:
+            json.dump(results, f, indent=4, ensure_ascii=False)
         # with open("safety_results.txt", "a") as f:
         #     f.write(results[-1] + "\n")
     # compare average score based on category
@@ -200,13 +218,25 @@ def main() -> None:
         score1 = sum(problem['score1'] for problem in results if problem['category'] == category)
         score2 = sum(problem['score2'] for problem in results if problem['category'] == category)
         print(f'{category}: {score1 / len(problems):.2f} vs {score2 / len(problems):.2f}')
+    # compare category level win-loss-draw rate
+    for category in categories:
+        win = sum(1 for problem in results if problem['category'] == category and problem['winner'] == 'red_model')
+        loss = sum(1 for problem in results if problem['category'] == category and problem['winner'] == 'blue_model')
+        draw = sum(1 for problem in results if problem['category'] == category and problem['winner'] == 'tie')
+        print(f'{category}: {win} vs {loss} vs {draw}')
     #print total average score
     score1 = sum(problem['score1'] for problem in results)
     score2 = sum(problem['score2'] for problem in results)
+    print(f'total: {score1 / len(problems):.3f} vs {score2 / len(problems):.3f}')
+    #print total win-loss-draw rate
+    win = sum(1 for problem in results if problem['winner'] == 'red_model')
+    loss = sum(1 for problem in results if problem['winner'] == 'blue_model')
+    draw = sum(1 for problem in results if problem['winner'] == 'tie')
+    print(f'total: {win} vs {loss} vs {draw}')
 
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
-    with open(os.path.join(args.output_dir, args.gpt_version + 'eval.json'), mode='w', encoding='utf-8') as f:
+    with open(os.path.join(args.output_dir, args.gpt_version + args.result_file +".json"), mode='w', encoding='utf-8') as f:
         json.dump(results, f, indent=4, ensure_ascii=False)
 
 if __name__ == '__main__':
