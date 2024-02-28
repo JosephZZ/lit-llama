@@ -21,9 +21,7 @@ import time
 import openai
 from tqdm import tqdm
 
-openai.api_key = "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"
-# openai.api_key = "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" #Yunqi‘s key
-
+openai.api_key = ""
 
 PROBLEM_PATH = "data/evaluation/beaver_safety_eval_questions.json"
 
