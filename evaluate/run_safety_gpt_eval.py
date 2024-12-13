@@ -23,9 +23,7 @@ from openai import AzureOpenAI
 
 REGION = "australiaeast"
 MODEL = "gpt-4-1106-preivew"
-API_KEY = "ac4236a5c9e487bd274c5b9207daf65f"
 
-API_BASE = "https://api.tonggpt.mybigai.ac.cn/proxy"
 ENDPOINT = f"{API_BASE}/{REGION}"
 
 
