@@ -56,11 +56,31 @@ class LLaMAConfig(llama.LLaMAConfig):
     adapter_start_layer: int = 2
 
 
+
+# def apply_rope(x: torch.Tensor, rope_cache: RoPECache) -> torch.Tensor:
+#     # truncate to support variable sizes
+#     T = x.size(1)
+#     rope_cache = rope_cache[:T]
+
+#     # cast because the reference does
+#     xshaped = x.float().reshape(*x.shape[:-1], -1, 2)
+#     rope_cache = rope_cache.view(1, xshaped.size(1), 1, xshaped.size(3), 2)
+#     x_out2 = torch.stack(
+#         [
+#             xshaped[..., 0] * rope_cache[..., 0] - xshaped[..., 1] * rope_cache[..., 1],
+#             xshaped[..., 1] * rope_cache[..., 0] + xshaped[..., 0] * rope_cache[..., 1],
+#         ],
+#         -1,
+#     )
+
+#     x_out2 = x_out2.flatten(3)
+#     return x_out2.type_as(x)
+
 class CausalSelfAttention(nn.Module):
     """A modification of `lit_llama.model.CausalSelfAttention` that adds the attention
     over the adaption prompt."""
 
-    def __init__(self, config: LLaMAConfig, block_idx: int, global_value_embedding=None) -> None:
+    def __init__(self, config: LLaMAConfig, block_idx: int, global_rotation_theta=None) -> None:
         super().__init__()
         assert config.n_embd % config.n_head == 0
 
@@ -71,15 +91,27 @@ class CausalSelfAttention(nn.Module):
 
         if block_idx >= config.adapter_start_layer:
             # adapter embedding layer
-            if global_value_embedding is not None:
-                self.adapter_wte = global_value_embedding
-                print("Using global value embedding for adapter at layer ", block_idx)
+            # if global_rotation_theta is not None:
+            #     self.rotation_theta = global_rotation_theta
+            #     print("Using global value embedding for adapter at layer ", block_idx)
+            # else:
+            # self.rotation_theta = torch.nn.Parameter(torch.zeros(config.n_embd//(config.n_head *2)))
+            if global_rotation_theta is not None:
+                self.rotation_theta = global_rotation_theta
+                print("Using global rotation theta for adapter at layer ", block_idx)
             else:
-                self.adapter_wte = nn.Embedding(config.adapter_prompt_length, config.n_embd)
+                if config.rotation_span == "embd_level":
+                    self.rotation_theta = torch.nn.Parameter(torch.zeros(config.n_embd//2))
+                elif config.rotation_span ==  "head_level":
+                    self.rotation_theta = torch.nn.Parameter(torch.zeros(config.n_embd//(config.n_head*2)))
+
+                print ("theta scale at layer{}: ".format(block_idx, torch.sum(self.rotation_theta)))
+
+
             # a learnable gating factor (to avoid potential disruption of pretrained weights) initialized with zeros (to
             # avoid noise from adaption prompts at the early training stage)
-            self.gating_factor = torch.nn.Parameter(torch.zeros(1, config.n_head, 1, 1))
-
+            # self.gating_factor = torch.nn.Parameter(torch.zeros(1, config.n_head, 1, 1))
+        self.config = config
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.block_size = config.block_size
@@ -105,23 +137,76 @@ class CausalSelfAttention(nn.Module):
         # - nh | number of heads
 
         B, T, C = x.size()
+        head_size = C // self.n_head
 
+        if self.config.rotation_place == "attention_o":
+            if self.config.rotation_span == "embd_level":
+                if self.block_idx >= self.adapter_start_layer:
+                    rotation = torch.stack([torch.cos(self.rotation_theta), torch.sin(self.rotation_theta)], dim=-1)
+                    x = x.view(B, T, 1, C)
+                    x = apply_rope(x, rotation.unsqueeze(0).expand(T,-1, -1))
+                    x = x.view(B, T, C)
+            if self.config.rotation_span == "head_level":
+                if self.block_idx >= self.adapter_start_layer:
+                    rotation = torch.stack([torch.cos(self.rotation_theta), torch.sin(self.rotation_theta)], dim=-1)
+                    x = x.view(B, T, self.n_head, head_size)
+                    x = apply_rope(x, rotation.unsqueeze(0).expand(T,-1, -1))
+                    x = x.view(B, T, C)
+            
         # instead of calculating `query`, `key` and `value` by separately multiplying input `x` with corresponding
         # weight matrices do it (for all heads) in a single multiplication with a matrix of 3x size (concatenated
         # weights for q, k, v) and then split the result along `embedding size` dimension
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2) # (B, T, 3 * C) --> 3 * (B, T, C)
 
+        if self.config.rotation_place == "attention_v":
+            if self.config.rotation_span == "embd_level":
+                if self.block_idx >= self.adapter_start_layer:
+                    rotation = torch.stack([torch.cos(self.rotation_theta), torch.sin(self.rotation_theta)], dim=-1)
+                    v = v.view(B, T, 1, C)
+                    v = apply_rope(v, rotation.unsqueeze(0).expand(T,-1, -1))
+                    v = v.view(B, T, C)
+        
+        if self.config.rotation_place == "attention_qk":
+            if self.config.rotation_span == "embd_level":
+                if self.block_idx >= self.adapter_start_layer:
+                    rotation = torch.stack([torch.cos(self.rotation_theta), torch.sin(self.rotation_theta)], dim=-1)
+                    q = q.view(B, T, 1, C)
+                    q = apply_rope(q, rotation.unsqueeze(0).expand(T,-1, -1))
+                    q = q.view(B, T, C)
+
+                    k = k.view(B, T, 1, C)
+                    k = apply_rope(k, rotation.unsqueeze(0).expand(T,-1, -1))
+                    k = k.view(B, T, C)
+
+
         # in order to move head_size (hs) dimension right after batch (B) dimension, we need to first split
         # embedding size (C) dimension into num_heads (nh) and head_size (hs)
-        head_size = C // self.n_head
         k = k.view(B, T, self.n_head, head_size)
         q = q.view(B, T, self.n_head, head_size)
         v = v.view(B, T, self.n_head, head_size)
+
+        if self.config.rotation_place == "attention_v":
+            if self.config.rotation_span == "head_level":
+                if self.block_idx >= self.adapter_start_layer:
+                    rotation = torch.stack([torch.cos(self.rotation_theta), torch.sin(self.rotation_theta)], dim=-1)
+                    v = apply_rope(v, rotation.unsqueeze(0).expand(T,-1, -1))
+
+        if self.config.rotation_place == "attention_qk":
+            if self.config.rotation_span == "head_level":
+                if self.block_idx >= self.adapter_start_layer:
+                    rotation = torch.stack([torch.cos(self.rotation_theta), torch.sin(self.rotation_theta)], dim=-1)
+                    q = apply_rope(q, rotation.unsqueeze(0).expand(T,-1, -1))
+                    k = apply_rope(k, rotation.unsqueeze(0).expand(T,-1, -1))
+
 
         # "Unlike standard positional embeddings rotary embeddings must be applied at every layer"
         q = apply_rope(q, rope) # (B, T, nh, hs)
         k = apply_rope(k, rope) # (B, T, nh, hs)
 
+        # if self.block_idx >= self.adapter_start_layer:
+        #     rotation = torch.stack([torch.cos(self.rotation_theta), torch.sin(self.rotation_theta)], dim=-1)
+        #     v = apply_rope(v, rotation.unsqueeze(0).expand(T,-1, -1))
+        
         # now `key`, 'query` and `value` tensors are correctly represented: for each element in a batch (B)
         # there is a number of heads (nh) and for each head there is a sequence of elements (T), each of them is
         # represented by a vector of size `hs`
@@ -147,47 +232,39 @@ class CausalSelfAttention(nn.Module):
         # efficient attention using Flash Attention CUDA kernels
         # ↓ (B, nh, T, hs) @ (B, nh, T, hs).mT --> (B, nh, T, T) @ (B, nh, T, hs) --> (B, nh, T, hs)
         y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0) # (B, nh, T, hs)
-        # implement the scaled product attention line by line
-        # ↓ (B, nh, T, hs) @ (B, nh, T, hs).mT --> (B, nh, T, T) @ (B, nh, T, hs) --> (B, nh, T, hs)
 
-        # logits = torch.einsum("bnqd,bnkd->bnqk", q, k) # (B, nh, T, T)
-        # if mask is not None:
-        #     logits = logits.masked_fill(mask == 0, float("-inf"))
-        # weights = F.softmax(logits, dim=-1) # (B, nh, T, T)
-
-        # print(torch.sort(weights[0,0,-1], descending=True)[0][:10])
-        # print("bigger than 0.1: ",(weights[0]>0.1).sum().item())
-        # print("bigger than 0.01: ",(weights[0]>0.01).sum().item())
-        # print("bigger than 0.001: ",(weights[0]>0.001).sum().item())
-        # print("bigger than 0.0001: ",(weights[0]>0.0001).sum().item())
-
-        # y = torch.einsum("bnqk,bnkd->bnqd", weights, v) # (B, nh, T, hs)
-
-        # "Adapters are applied to the topmost layers to better tune the language
-        # representations with higher-level semantics".
-        if self.block_idx >= self.adapter_start_layer:
-            if adapter_kv_cache is not None:
-                ak, av = adapter_kv_cache # 2 * (B, nh, aT, hs)
-            else:
-                prefix = self.adapter_wte.weight.reshape(1, self.adapter_prompt_length, self.n_embd)
-                aT = prefix.size(1)
-                _, ak, av = self.c_attn(prefix).split(self.n_embd, dim=2) # (1, aT, 3 * C) --> 3 * (1, aT, C)
-                ak = ak.view(1, aT, self.n_head, head_size).repeat(B, 1, 1, 1).transpose(1, 2) # (B, nh, aT, hs)
-                av = av.view(1, aT, self.n_head, head_size).repeat(B, 1, 1, 1).transpose(1, 2) # (B, nh, aT, hs)
-                adapter_kv_cache = (ak, av)
-
-            # Apply cross-attention with `query`, `adapter_key`, `adapter_value` and sum the output with the output
-            # obtained from self-attention step. This is mathematically equivalent to concatenation of prefix and input as per paper.
-            amask = torch.ones(q.shape[-2], ak.shape[-2], dtype=torch.bool, device=x.device) # (T, aT)
-            # ↓ (B, nh, T, hs) @ (B, nh, aT, hs).mT --> (B, nh, T, aT) @ (B, nh, aT, hs) --> (B, nh, T, hs)
-            # TODO: add a network that adapts the k and v of value_embedding based on the input q
-            ay = F.scaled_dot_product_attention(q, ak, av, attn_mask=amask, dropout_p=0.0, is_causal=False) # (B, nh, T, hs)
-            y = y + self.gating_factor * ay
 
         y = y.transpose(1, 2).contiguous().view(B, T, C)  # re-assemble all head outputs side by side
 
+        if self.config.rotation_place == "attention_y":
+            if self.block_idx >= self.adapter_start_layer:
+                if self.config.rotation_span == "embd_level":
+                    rotation = torch.stack([torch.cos(self.rotation_theta), torch.sin(self.rotation_theta)], dim=-1)
+                    y = y.view(B, T, 1, C)
+                    y = apply_rope(y, rotation.unsqueeze(0).expand(T,-1, -1))
+                    y = y.view(B, T, C)
+
+                if self.config.rotation_span == "head_level":
+                    rotation = torch.stack([torch.cos(self.rotation_theta), torch.sin(self.rotation_theta)], dim=-1)
+                    y = y.view(B, T, self.n_head, head_size)
+                    y = apply_rope(y, rotation.unsqueeze(0).expand(T,-1, -1))
+                    y = y.view(B, T, C)
         # output projection
         y = self.c_proj(y) # (B, T, C)
+
+        if self.config.rotation_place == "attention_y_projected":
+            if self.block_idx >= self.adapter_start_layer:
+                if self.config.rotation_span == "embd_level":
+                    rotation = torch.stack([torch.cos(self.rotation_theta), torch.sin(self.rotation_theta)], dim=-1)
+                    y = y.view(B, T, 1, C)
+                    y = apply_rope(y, rotation.unsqueeze(0).expand(T,-1, -1))
+                    y = y.view(B, T, C)
+
+                if self.config.rotation_span == "head_level":
+                    rotation = torch.stack([torch.cos(self.rotation_theta), torch.sin(self.rotation_theta)], dim=-1)
+                    y = y.view(B, T, self.n_head, head_size)
+                    y = apply_rope(y, rotation.unsqueeze(0).expand(T,-1, -1))
+                    y = y.view(B, T, C)
 
         return y, kv_cache, adapter_kv_cache
 
@@ -212,12 +289,13 @@ class Block(nn.Module):
     """The implementation is identical to `lit_llama.model.Block` with the exception that
     we replace the attention layer where adaption is implemented."""
 
-    def __init__(self, config: LLaMAConfig, block_idx: int, global_value_embedding=None) -> None:
+    def __init__(self, config: LLaMAConfig, block_idx: int, global_rotation_theta=None) -> None:
         super().__init__()
         self.rms_1 = RMSNorm(config.n_embd)
-        self.attn = CausalSelfAttention(config, block_idx, global_value_embedding)
+        self.attn = CausalSelfAttention(config, block_idx, global_rotation_theta)
         self.rms_2 = RMSNorm(config.n_embd)
         self.mlp = MLP(config)
+        self.block_idx = block_idx
 
     def forward(
         self,
@@ -229,6 +307,18 @@ class Block(nn.Module):
         kv_cache: Optional[KVCache] = None,
         adapter_kv_cache: Optional[KVCache] = None,
     ) -> Tuple[torch.Tensor, Optional[KVCache], Optional[KVCache]]:
+        # print(f'block_idx: {self.block_idx}')
+        # print(f'     bigger than 0.01:{torch.sum(self.rms_1.scale>0.001)}')
+        # print(f'     bigger than 0.1:{torch.sum(self.rms_1.scale>0.1)}')
+        # print(f'     bigger than 0.2:{torch.sum(self.rms_1.scale>0.2)}')
+        # print(f'     bigger than 0.3:{torch.sum(self.rms_1.scale>0.3)}')
+        # print(f'     bigger than 0.4:{torch.sum(self.rms_1.scale>0.4)}')
+        # print(f'     bigger than 0.5:{torch.sum(self.rms_1.scale>0.5)}')
+        # print(f'     bigger than 0.6:{torch.sum(self.rms_1.scale>0.6)}')
+        # print(f'     bigger than 0.7:{torch.sum(self.rms_1.scale>0.7)}')
+        # print(f'     bigger than 0.8:{torch.sum(self.rms_1.scale>0.8)}')
+        # print(f'     bigger than 0.9:{torch.sum(self.rms_1.scale>0.9)}')
+
         h, new_kv_cache, new_adapter_kv_cache = self.attn(
             self.rms_1(x), rope, mask, max_seq_length, input_pos, kv_cache, adapter_kv_cache
         )
@@ -247,13 +337,19 @@ class LLaMA(llama.LLaMA):
         assert config.block_size is not None
         self.config = config
 
-        self.global_value_embedding = nn.Embedding(config.adapter_prompt_length, config.n_embd)
+        if config.using_global_rotation:
+            if config.rotation_span == "embd_level":
+                self.global_rotation_theta = torch.nn.Parameter(torch.zeros(config.n_embd//2))
+            elif config.rotation_span ==  "head_level":
+                self.global_rotation_theta = torch.nn.Parameter(torch.zeros(config.n_embd//(config.n_head*2)))
+            else:
+                raise ValueError("Invalid rotation_span: {}".format(config.rotation_span))
 
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.transformer = nn.ModuleDict(
             dict(
                 wte=nn.Embedding(config.vocab_size, config.n_embd),
-                h=nn.ModuleList(Block(config, i, self.global_value_embedding) for i in range(config.n_layer)),
+                h=nn.ModuleList(Block(config, i, self.global_rotation_theta if config.using_global_rotation else None) for i in range(config.n_layer)),
                 ln_f=RMSNorm(config.n_embd),
             )
         )
@@ -328,9 +424,9 @@ class LLaMA(llama.LLaMA):
 def mark_only_adapter_as_trainable(model: LLaMA) -> None:
     """Sets `requires_grad=False` for all non-adapter weights."""
     for name, param in model.named_parameters():
-        param.requires_grad = "adapter_wte" in name or "gating_factor" in name or "global_value_embedding" in name
+        param.requires_grad = "rotation_theta" in name or "gating_factor" in name or "global_rotation_theta" in name
 
 
 def adapter_state_from_state_dict(state_dict: dict) -> dict:
     """Returns the model state dict with only the adapter weights for saving."""
-    return {name: param for name, param in state_dict.items() if "adapter_wte" in name or "gating_factor" in name or "global_value_embedding" in name}
+    return {name: param for name, param in state_dict.items() if "rotation_theta" in name or "gating_factor" in name or "global_rotation_theta" in name}

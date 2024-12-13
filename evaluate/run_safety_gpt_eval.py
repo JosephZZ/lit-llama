@@ -17,11 +17,24 @@ import argparse
 import json
 import os
 import time
-
-import openai
 from tqdm import tqdm
 
-openai.api_key = ""
+from openai import AzureOpenAI
+
+REGION = "australiaeast"
+MODEL = "gpt-4-1106-preivew"
+API_KEY = "ac4236a5c9e487bd274c5b9207daf65f"
+
+API_BASE = "https://api.tonggpt.mybigai.ac.cn/proxy"
+ENDPOINT = f"{API_BASE}/{REGION}"
+
+
+client = AzureOpenAI(
+    api_key=API_KEY,
+    api_version="2024-02-01",
+    azure_endpoint=ENDPOINT,
+)
+
 
 PROBLEM_PATH = "data/evaluation/beaver_safety_eval_questions.json"
 
@@ -73,15 +86,15 @@ def parse_arguments() -> argparse.Namespace:
         '--output_dir',
         type=str,
         help='Where to store the eval output.',
-        default="out/DPO/eval"
+        default="out/beaverEvalComparisons/"
     )
 
         # Logging
     parser.add_argument(
         '--gpt_version',
         type=str,
-        help='specify gpt-3.5-turbo or gpt-4',
-        default="gpt-3.5-turbo"
+        help='specify gpt-3.5-turbo or gpt-4-1106-preview',
+        default="gpt-4-1106-preview"
     )
 
     parser.add_argument(
@@ -115,7 +128,7 @@ def parse_arguments() -> argparse.Namespace:
 
 def gpt_eval(sys_prompt: str, user_prompt: str, gpt_version:str) -> str:
     try:
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model=gpt_version,
             messages=[
                 {'role': 'system', 'content': sys_prompt},
@@ -127,7 +140,7 @@ def gpt_eval(sys_prompt: str, user_prompt: str, gpt_version:str) -> str:
             temperature=0.7,
             max_tokens=2048,
         )
-        return response['choices'][0]['message']['content']
+        return response.choices[0].message.content
     except Exception as ex:  # pylint: disable=broad-except # noqa: BLE001
         print(ex)
         time.sleep(3)
@@ -152,10 +165,10 @@ def main() -> None:
     """The main function."""
     args = parse_arguments()
 
-    if True:
-        args.red_corner_model_output_name_or_path = "/home/shuwen/ziheng/llm/lit-llama/out/DPO/ref_lora_8/lit-llama-2-beaver_safe2/7B/base_beaver_safe_alpacaStyle_SFT-1vector-start_layer2-lr0.0001bs32/lora-beaver_safety_eval_questions_results.json"
-
-        args.blue_corner_model_output_name_or_path =  "/home/shuwen/ziheng/llm/lit-llama/out/DPO/aligner/lit-llama-2-beaver_safe2/7B/base_beaver_safe_alpacaStyle_SFT-10vector-start_layer2-beta0.1lr0.0001bs64/aligner10-7B-beaver_safety_eval_questions_epoch-3.0-iter-059999_results.json"
+    if args.red_corner_model_output_name_or_path is None :
+        args.red_corner_model_output_name_or_path = "/home/zhouziheng/Desktop/lit-llama/out/full/beaver_safety_7B/alpaca_beaversafe_zero_shot_results.json"
+    if args.blue_corner_model_output_name_or_path is None:
+        args.blue_corner_model_output_name_or_path =  "/home/zhouziheng/Desktop/lit-llama/out/aligner/beaver_safety_7B/beaver_safety_eval_questions_epoch-3.0-iter-059999_results.json"
        
     with open(PROBLEM_PATH, encoding='utf-8') as f:
         problems = json.load(f)

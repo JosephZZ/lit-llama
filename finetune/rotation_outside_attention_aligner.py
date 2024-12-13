@@ -26,7 +26,7 @@ wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
 from generate import generate
-from lit_llama.aligner import LLaMA, LLaMAConfig, mark_only_adapter_as_trainable, adapter_state_from_state_dict
+from lit_llama.rotation_outside_attention_aligner import LLaMA, LLaMAConfig, mark_only_adapter_as_trainable, adapter_state_from_state_dict
 from lit_llama.tokenizer import Tokenizer
 from scripts.prepare_alpaca import generate_prompt
 from lightning.fabric.strategies import DeepSpeedStrategy
@@ -82,14 +82,14 @@ from lightning.fabric.strategies import DeepSpeedStrategy
 # os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 # put the above hyperparameters inside the main function inputs
 def main(
-        learning_rate: float = 5e-3,
+        learning_rate: float = 1e-3,
         batch_size: int = 32,
         micro_batch_size: int = 4,
         epoch_size: int = 100,
-        num_epochs: int = 600,
+        num_epochs: int = 500,
         weight_decay: float = 0.02,
         max_seq_length: int = 512,
-        warmup_epoch: int = 80,
+        warmup_epoch: int = 30,
         start_iter: int = 0,
         instruction_tuning: bool = True,
         eval_interval: int = 30,
@@ -98,18 +98,20 @@ def main(
         log_interval: int = 10,
         safer_or_better: str = 'safer',
         model_size: str = '7B',
-        aligner_length: int = 10,
-        data_dir: Path = Path("data/rolebench/eng_instruction_generalization_doctorwho_100"),
+        aligner_length: int = 1,
+        data_dir: Path = Path("data/rolebench/eng_instruction_generalization_sheldon_100"),
         aligner_start_layer: int = 2,
         model_base: str = "lit-llama-2",
         model_version: str = "7B",
         devices: int = 1,
-        previous_aligner_path: str = "",
-        previous_optimizer_path: str = ""
+        previous_aligner_path: str = "", #"out/rotation_before_scale_aligner_globalRotation-False/lit-llama-2-eng_instruction_generalization_sheldon_100/7B/1vector-start_layer2-lr0.005bs32weightDecay0.02wu30/final.pth",
+        previous_optimizer_path: str = "", #"out/rotation_before_scale_aligner_globalRotation-False/lit-llama-2-eng_instruction_generalization_sheldon_100/7B/1vector-start_layer2-lr0.005bs32weightDecay0.02wu30/optimizer-final-epoch-600.0--valloss5.7226.pth",
+        using_global_rotation: bool = False,
+        rotation_place = "normedX_to_mlp",
 ):
     
     pretrained_path: Path = Path(f"checkpoints/{model_base}/{model_version}/lit-llama.pth")
-    out_dir: Path = Path(f"out/aligner/{model_base}-{data_dir.name}/{model_version}/{aligner_length}vector-start_layer{aligner_start_layer}-lr{learning_rate}bs{int(batch_size)}weightDecay{weight_decay}wu{warmup_epoch}/")
+    out_dir: Path = Path(f"out/rotation_outside_attention_aligner/rotate_{rotation_place}_globalRotation-{using_global_rotation}/{model_base}-{data_dir.name}/{model_version}/{aligner_length}vector-start_layer{aligner_start_layer}-lr{learning_rate}bs{int(batch_size)}weightDecay{weight_decay}wu{warmup_epoch}/")
     max_iters: int = int(num_epochs * (epoch_size // micro_batch_size) // devices)
     save_model_name = f"{model_base}-{model_version}-{aligner_length}vector-start_layer{aligner_start_layer}-lr{learning_rate}bs{int(batch_size)}wu{warmup_epoch}.pth"
     warmup_iters = warmup_epoch * (epoch_size // micro_batch_size) // devices  # 2 alpaca epochs
@@ -319,8 +321,9 @@ def main(
 
     config = LLaMAConfig.from_name(model_size)
     config.block_size = max_seq_length
-    config.adapter_prompt_length = aligner_length
+    config.using_global_rotation = using_global_rotation
     config.adapter_start_layer = aligner_start_layer
+    config.rotation_place = rotation_place
 
     if not os.path.isfile(pretrained_path):
         raise FileNotFoundError(
@@ -336,7 +339,7 @@ def main(
         if previous_aligner_path:
             model.load_state_dict(torch.load(previous_aligner_path), strict=False)
 
-    print("aligner length: ",model.config.adapter_prompt_length)
+    # print("aligner length: ",model.config.adapter_prompt_length)
 
     mark_only_adapter_as_trainable(model)
 

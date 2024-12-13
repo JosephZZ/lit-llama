@@ -147,42 +147,27 @@ class CausalSelfAttention(nn.Module):
         # efficient attention using Flash Attention CUDA kernels
         # ↓ (B, nh, T, hs) @ (B, nh, T, hs).mT --> (B, nh, T, T) @ (B, nh, T, hs) --> (B, nh, T, hs)
         y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0) # (B, nh, T, hs)
-        # implement the scaled product attention line by line
-        # ↓ (B, nh, T, hs) @ (B, nh, T, hs).mT --> (B, nh, T, T) @ (B, nh, T, hs) --> (B, nh, T, hs)
-
-        # logits = torch.einsum("bnqd,bnkd->bnqk", q, k) # (B, nh, T, T)
-        # if mask is not None:
-        #     logits = logits.masked_fill(mask == 0, float("-inf"))
-        # weights = F.softmax(logits, dim=-1) # (B, nh, T, T)
-
-        # print(torch.sort(weights[0,0,-1], descending=True)[0][:10])
-        # print("bigger than 0.1: ",(weights[0]>0.1).sum().item())
-        # print("bigger than 0.01: ",(weights[0]>0.01).sum().item())
-        # print("bigger than 0.001: ",(weights[0]>0.001).sum().item())
-        # print("bigger than 0.0001: ",(weights[0]>0.0001).sum().item())
-
-        # y = torch.einsum("bnqk,bnkd->bnqd", weights, v) # (B, nh, T, hs)
 
         # "Adapters are applied to the topmost layers to better tune the language
         # representations with higher-level semantics".
         if self.block_idx >= self.adapter_start_layer:
             if adapter_kv_cache is not None:
-                ak, av = adapter_kv_cache # 2 * (B, nh, aT, hs)
+                av = adapter_kv_cache # 2 * (B, nh, aT, hs)
             else:
                 prefix = self.adapter_wte.weight.reshape(1, self.adapter_prompt_length, self.n_embd)
                 aT = prefix.size(1)
-                _, ak, av = self.c_attn(prefix).split(self.n_embd, dim=2) # (1, aT, 3 * C) --> 3 * (1, aT, C)
-                ak = ak.view(1, aT, self.n_head, head_size).repeat(B, 1, 1, 1).transpose(1, 2) # (B, nh, aT, hs)
+                _, _, av = self.c_attn(prefix).split(self.n_embd, dim=2) # (1, aT, 3 * C) --> 3 * (1, aT, C)
+                # ak = ak.view(1, aT, self.n_head, head_size).repeat(B, 1, 1, 1).transpose(1, 2) # (B, nh, aT, hs)
                 av = av.view(1, aT, self.n_head, head_size).repeat(B, 1, 1, 1).transpose(1, 2) # (B, nh, aT, hs)
-                adapter_kv_cache = (ak, av)
+                adapter_kv_cache = av
 
             # Apply cross-attention with `query`, `adapter_key`, `adapter_value` and sum the output with the output
             # obtained from self-attention step. This is mathematically equivalent to concatenation of prefix and input as per paper.
-            amask = torch.ones(q.shape[-2], ak.shape[-2], dtype=torch.bool, device=x.device) # (T, aT)
+            # amask = torch.ones(q.shape[-2], ak.shape[-2], dtype=torch.bool, device=x.device) # (T, aT)
             # ↓ (B, nh, T, hs) @ (B, nh, aT, hs).mT --> (B, nh, T, aT) @ (B, nh, aT, hs) --> (B, nh, T, hs)
             # TODO: add a network that adapts the k and v of value_embedding based on the input q
-            ay = F.scaled_dot_product_attention(q, ak, av, attn_mask=amask, dropout_p=0.0, is_causal=False) # (B, nh, T, hs)
-            y = y + self.gating_factor * ay
+            # ay = F.scaled_dot_product_attention(q, ak, av, attn_mask=amask, dropout_p=0.0, is_causal=False) # (B, nh, T, hs)
+            y = y + self.gating_factor * av
 
         y = y.transpose(1, 2).contiguous().view(B, T, C)  # re-assemble all head outputs side by side
 

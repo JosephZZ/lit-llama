@@ -16,24 +16,27 @@ from lit_llama import Tokenizer
 from lit_llama.aligner import LLaMA
 from lit_llama.utils import lazy_load, llama_model_lookup, quantization
 import json
+from datasets import load_metric
 
-beaver_safety_eval_question_path = Path("data/evaluation/beaver_safety_eval_questions.json")
 
 def main(
     prompt: str = "In this task, you are given a string consisting of lowercase English letters and your job is to convert it into uppercase.\nhello world!",
     input: str = "",
-    aligner_path: Path = Path("out/aligner/lit-llama-2-eng_instruction_generalization_sheldon/7B/1vector-start_layer2-lr0.009bs64weightDecay0.02wu5/final.pth"),
+    test_file_path = Path("data/rolebench/rolegpt_baseline.jsonl"),
+    aligner_path: Path = Path("out/aligner/lit-llama-2-eng_instruction_generalization_sheldon_100/7B/1vector-start_layer2-lr0.009bs32weightDecay0.02wu15/epoch-199.6-valloss1.5551"),
     pretrained_path: Path = Path("checkpoints/lit-llama-2/7B/lit-llama.pth"),
     tokenizer_path: Path = Path("checkpoints/lit-llama-2/tokenizer.model"),
     question_file = None, 
-    is_save_results_to_file = False,
-    is_beaver_safety_eval = True,
+    is_save_results_to_file = True,
+    is_beaver_safety_eval = False,
     quantize: Optional[str] = None,
     max_new_tokens: int = 100,
     top_k: int = 200,
     temperature: float = 0.7,
     aligner_length: int = 1,
-    instruct_style: str = "alpaca", # or "alpaca"
+    instruct_style: str = "rolebench", # or "alpaca"
+    test_role = "Sheldon Cooper",
+    N = 100,
 ) -> None:
     """Generates a response based on a given instruction and an optional input.
     This script will only work with checkpoints from the instruction-tuned LLaMA-Adapter model.
@@ -82,17 +85,17 @@ def main(
 
     tokenizer = Tokenizer(tokenizer_path)
 
-    if is_beaver_safety_eval:
-        question_file = beaver_safety_eval_question_path
-        is_save_results_to_file = True
-    
-    if question_file:
-        samples = extract_prompts_from_file(question_file)
-    else:
-        samples = extract_prompts_from_input(prompt, input)
 
-    
-    for sample in samples:
+    with open(test_file_path, "r") as file:
+        # data = json.load(file)
+        data_test = file.readlines()
+        data_test = [json.loads(line) for line in data_test]
+        data_test = [jl for jl in data_test if jl['role']==test_role]
+
+    i=0
+    new_data_test = []
+    data_test = data_test[:N]
+    for sample in data_test:
         prompt = generate_prompt(sample, instruct_style)
         encoded = tokenizer.encode(prompt, bos=True, eos=False, device=model.device)
         prompt_length = encoded.size(0)
@@ -107,27 +110,61 @@ def main(
         print(output)
 
         output = output.split("### Response:")[1].split("### Instruction")[0].strip()
-        sample["response"] = output
+        sample["model_response"] = output
         sample["model"] = str(aligner_path)
+        new_data_test.append(sample)
 
         tokens_generated = y.size(0) - prompt_length
         print(f"\n\nTime for inference: {t:.02f} sec total, {tokens_generated / t:.02f} tokens/sec", file=sys.stderr)
         if fabric.device.type == "cuda":
             print(f"Memory used: {torch.cuda.max_memory_reserved() / 1e9:.02f} GB", file=sys.stderr)
 
+        rouge = load_metric('rouge')
+
+        i += 1
+        if i % 200 == 0:
+            results = rouge.compute(predictions=[result["model_response"] for result in new_data_test], references=[result["generated"] for result in data_test][:i], rouge_types=["rougeL"])
+            rougeL_score = results['rougeL']
+            print("rougeL: {}".format(rougeL_score))
+
+            # ave_rougeL = data_test["rougeL"].sum() / len(data_test)
+            # print("ave_rougeL: ", ave_rougeL)
+            if is_save_results_to_file:
+                #file path is where the aligner path folder is and the name is the question file name + "_results.json"
+                file_path = aligner_path.parent / (test_file_path.stem + "_" + test_role + "_" + aligner_path.stem + "_results.json")
+
+                with open(file_path, "w") as f:
+                    json.dump(data_test, f, indent=4)
+                    f.write("\n\nrougeL: {}".format(rougeL_score))
+
+                print("Results saved to ", file_path)
+    results = rouge.compute(predictions=[result["model_response"] for result in data_test], references=[result["generated"] for result in data_test], rouge_types=["rougeL"])
+    rougeL_score = results['rougeL']
+    print("rougeL: {}".format(rougeL_score))
+
+    # ave_rougeL = data_test["rougeL"].sum() / len(data_test)
+    # print("ave_rougeL: ", ave_rougeL)
     if is_save_results_to_file:
         #file path is where the aligner path folder is and the name is the question file name + "_results.json"
-        file_path = aligner_path.parent / (question_file.stem + "_" + aligner_path.stem + "_results.json")
+        file_path = aligner_path.parent / (test_file_path.stem + "_" + test_role + "_" + aligner_path.stem + "_results.json")
 
         with open(file_path, "w") as f:
-            json.dump(samples, f, indent=4)
+            json.dump(data_test, f, indent=4)
+            f.write("\n\nrougeL: {}".format(rougeL_score))
+
         print("Results saved to ", file_path)
 
 
 def generate_prompt(example, instruct_style):
     """Generates a standardized message to prompt the model with an instruction, optional input and a
     'response' field."""
-    if instruct_style == "alpaca":
+    if instruct_style == "rolebench":
+        return (
+            "Below is an instruction that describes a task. "
+            "Write a response that appropriately completes the request.\n\n"
+            f"### Instruction:\n{example['question']}\n\n### Response:"
+        )
+    elif instruct_style == "alpaca":
         if example["input"]:
             return (
                 "Below is an instruction that describes a task, paired with an input that provides further context. "
@@ -170,6 +207,7 @@ def extract_prompts_from_input(prompts, inputs):
     else:
         samples = [{"instruction": p.strip(), "input": ""} for p in prompts]
     return samples
+
 if __name__ == "__main__":
     from jsonargparse import CLI
 

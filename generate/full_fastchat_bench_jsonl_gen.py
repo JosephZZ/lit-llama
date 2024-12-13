@@ -19,22 +19,23 @@ from generate import generate
 from lit_llama import Tokenizer
 from lit_llama.model import LLaMA
 from lit_llama.utils import lazy_load, llama_model_lookup, quantization
-from scripts.prepare_alpaca import generate_multi_turn_prompt
+# from scripts.prepare_alpaca import generate_prompt
 
 
 def main(
     prompt: str = "What food do lamas eat?",
     input: str = "",
-    pretrained_path: Path = Path("checkpoints/lit-llama-2/13B-chat/lit-llama.pth"),
+    pretrained_path: Path = Path("checkpoints/lit-llama-2/7B/lit-llama.pth"),
     tokenizer_path: Path = Path("checkpoints/lit-llama-2/tokenizer.model"),
     quantize: Optional[str] = None,
     max_new_tokens: int = 100,
     top_k: int = 200,
     temperature: float = 0.7,
-    question_file: Path = Path("/home/ziheng/ssd-drive1/projects/llm/lit-llama/data/evaluation/Vicuna_questions.jsonl"),
+    question_file: Path = Path("data/evaluation/Vicuna_questions.jsonl"),
     num_choices: int = 1,
     file_suffix : str = "",
     is_multi_turn: bool = False,
+    instruct_style = "alpaca_3_shot"
 ) -> None:
     """Generates a response based on a given instruction and an optional input.
     This script will only work with checkpoints from the instruction-tuned LLaMA-Adapter model.
@@ -82,7 +83,7 @@ def main(
 
     if question_file is None:
         sample = {"instruction": prompt, "input": input}
-        prompt = generate_multi_turn_prompt(sample,[])
+        prompt = generate_prompt(sample,instruct_style=instruct_style)
         encoded = tokenizer.encode(prompt, bos=True, eos=False, device=model.device)
         prompt_length = encoded.size(0)
 
@@ -115,7 +116,7 @@ def main(
                 history = []
                 for j in range(len(question["turns"])):
                     sample = {"instruction": question["turns"][j], "input": ""}
-                    prompt = generate_multi_turn_prompt(sample,history)
+                    prompt = generate_prompt(sample,instruct_style=instruct_style)
 
                     print("\n\n Turn {} with prompt length {}: \n\n {}".format(j,len(prompt), prompt))
                     encoded = tokenizer.encode(prompt, bos=True, eos=False, device=model.device)
@@ -189,6 +190,91 @@ def reorg_answer_file(answer_file):
             fout.write(answers[qid])
 
 
+
+def generate_prompt(example, instruct_style):
+    """Generates a standardized message to prompt the model with an instruction, optional input and a
+    'response' field."""
+    if instruct_style == "alpaca":
+        if example["input"]:
+            return (
+                "Below is an instruction that describes a task, paired with an input that provides further context. "
+                "Write a response that appropriately completes the request.\n\n"
+                f"### Instruction:\n{example['instruction']}\n\n### Input:\n{example['input']}\n\n### Response:"
+            )
+        return (
+            "Below is an instruction that describes a task. "
+            "Write a response that appropriately completes the request.\n\n"
+            f"### Instruction:\n{example['instruction']}\n\n### Response:"
+        )
+    elif instruct_style == "alpacaLong":
+        if example["input"]:
+            return (
+                "Below is an instruction that describes a task, paired with an input that provides further context. "
+                "Write a response that appropriately completes the request.\n\n"
+                f"### Instruction:\n{example['instruction']}\n\n### Input:\n{example['input']}\n\n### Response:"
+            )
+        return (
+            "Below is an instruction that describes a task. "
+            "Write a high quality and expanded response that appropriately completes the request.\n\n"
+            f"### Instruction:\n{example['instruction']}\n\n### Response:"
+        )
+    elif instruct_style == "orca" or  instruct_style ==  "baize":
+        return "[|User|] "+ example['instruction']+" [|AI Assistant|] "
+    elif instruct_style == "beaver":
+        return "[User] "+ example['instruction']+" [Assistant] "
+    elif instruct_style == "alpaca_zero_shot":
+        if example["input"]:
+            return (
+                "Below is an instruction that describes a task, paired with an input that provides further context. "
+                "Write a response that appropriately completes the request.\n\n"
+                f"### Instruction:\n{example['instruction']}\n\n### Input:\n{example['input']}\n\n### Response:"
+            )
+        return (
+            "Below is an instruction that describes a task. "
+            "Write a response that appropriately completes the request. The response should consider aspects such as helpfulness, relevance, accuracy, depth, creativity, and level of detail.\n\n"
+            f"### Instruction:\n{example['instruction']}\n\n### Response:"
+        )
+    elif instruct_style == "alpaca_one_shot":
+        if example["input"]:
+            return (
+                "Below is an instruction that describes a task, paired with an input that provides further context. "
+                "Write a response that appropriately completes the request.\n\n"
+                f"### Instruction:\n{example['instruction']}\n\n### Input:\n{example['input']}\n\n### Response:"
+            )
+        return (
+            "Below is an instruction that describes a task. "
+            "Write a response that appropriately completes the request. The response should consider aspects such as helpfulness, relevance, accuracy, depth, creativity, and level of detail. \
+            For example, \n \
+            Instruction: Give three tips for staying healthy. \
+            Response: Eat a balanced diet and make sure to include plenty of fruits and vegetables. \n2. Exercise regularly to keep your body active and strong. \n3. Get enough sleep and maintain a consistent sleep schedule. \
+            \n\n"
+            f"### Instruction:\n{example['instruction']}\n\n### Response:"
+        )
+    elif instruct_style == "alpaca_3_shot":
+        if example["input"]:
+            return (
+                "Below is an instruction that describes a task, paired with an input that provides further context. "
+                "Write a response that appropriately completes the request.\n\n"
+                f"### Instruction:\n{example['instruction']}\n\n### Input:\n{example['input']}\n\n### Response:"
+            )
+        return (
+            "Below is an instruction that describes a task. "
+            "Write a response that appropriately completes the request. The response should consider aspects such as helpfulness, relevance, accuracy, depth, creativity, and level of detail. \
+            For examples, \n \
+            Instruction: Give three tips for staying healthy. \
+            Response: Eat a balanced diet and make sure to include plenty of fruits and vegetables. \n2. Exercise regularly to keep your body active and strong. \n3. Get enough sleep and maintain a consistent sleep schedule. \
+            \n \
+            Instruction: What are the three primary colors? \
+            Response: The three primary colors are red, blue, and yellow. \
+            \n \
+            Instruction: Describe the structure of an atom. \
+            Response: An atom is made up of a nucleus, which contains protons and neutrons, surrounded by electrons that travel in orbits around the nucleus. The protons and neutrons have a positive charge, while the electrons have a negative charge, resulting in an overall neutral atom. The number of each particle determines the atomic number and the type of atom. \
+            \n\n"
+            f"### Instruction:\n{example['instruction']}\n\n### Response:"
+        )
+    else:
+        raise ValueError(f"Unknown instruction style: {instruct_style}")
+    
 
 if __name__ == "__main__":
     from jsonargparse import CLI
